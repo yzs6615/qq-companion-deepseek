@@ -249,25 +249,36 @@ function Install-All($A) {
   [IO.File]::WriteAllText((Join-Path $dir 'AGENTS.md'), (Expand-Template ([IO.File]::ReadAllText((Join-Path $app 'installer\AGENTS.tpl.md'), [Text.Encoding]::UTF8)) $A.name $on), (New-Object Text.UTF8Encoding($false)))
   Mark '配置（.env / 人设 / AGENTS.md）' $true
 
-  # 3. Node.js（18 以上就不装）
+  # 3. Node.js：要 24 以上，低了就装 Node 24。DSH 在 22.11 这种旧版上会悄悄跑不起来（没输出也不报错），24 实测能跑。
+  # 找哪个 node 跟启动器、守护一样：先 C:\Program Files\nodejs，再 PATH，免得检查的和实际用的不是同一个。
   Set-Progress 12 'Node.js'
   Refresh-Path
-  $node = Find-Exe @('node')
-  $ver = if ($node) { (& $node --version) -replace '^v', '' } else { '' }
-  if (-not $node -or [int]($ver.Split('.')[0]) -lt 18) {
+  $nodeMin = 24
+  function Find-Node {
+    if ($A.nodeExe) { return $A.nodeExe }   # 测试用：当成电脑上装的就是这个
+    $pf = 'C:\Program Files\nodejs\node.exe'
+    if (Test-Path $pf) { return $pf }
+    return Find-Exe @('node')
+  }
+  function Get-NodeVersion([string]$exe) { try { return ((& $exe --version) -replace '^v', '').Trim() } catch { return '' } }
+  function Test-NodeNew([string]$v) { return [bool]$v -and [int]($v.Split('.')[0]) -ge $nodeMin }
+  $node = Find-Node
+  $ver = if ($node) { Get-NodeVersion $node } else { '' }
+  if (-not (Test-NodeNew $ver)) {
     try {
       $base = if ($mirror) { 'https://npmmirror.com/mirrors/node' } else { 'https://nodejs.org/dist' }
       $index = (New-Object Net.WebClient).DownloadString("$base/index.json") | ConvertFrom-Json
-      $pick = $index | Where-Object { $_.lts -and $_.version -like 'v22.*' } | Select-Object -First 1
+      $pick = $index | Where-Object { $_.lts -and $_.version -like "v$nodeMin.*" } | Select-Object -First 1
+      if (-not $pick) { throw "没找到 Node.js $nodeMin 的长期支持版" }
       $msi = Join-Path $env:TEMP "node-$($pick.version)-x64.msi"
       Get-File @("$base/$($pick.version)/node-$($pick.version)-x64.msi") $msi "Node.js $($pick.version)（约 30MB）"
-      Say '  安装 Node.js…'
+      Say $(if ($ver) { "  电脑上的 Node.js 是 v$ver，太旧了，换成 $($pick.version)…" } else { '  安装 Node.js…' })
       $code = Invoke-Tool 'msiexec.exe' @('/i', $msi, '/qn', '/norestart') $env:TEMP
       Refresh-Path
-      $node = Find-Exe @('node')
-      if (-not $node -and (Test-Path 'C:\Program Files\nodejs\node.exe')) { $node = 'C:\Program Files\nodejs\node.exe' }
-      if (-not $node) { throw "msiexec 退出码 $code" }
-      Mark "Node.js $($pick.version)" $true
+      $node = Find-Node
+      $now = if ($node) { Get-NodeVersion $node } else { '' }
+      if (-not (Test-NodeNew $now)) { throw "装完还是$(if ($now) { " v$now" } else { '找不到 node' })（msiexec 退出码 $code）" }
+      Mark "Node.js v$now$(if ($ver) { "（原来的 v$ver 太旧，换了新的）" })" $true
     } catch { Mark 'Node.js' $false $_.Exception.Message; return $results }
   } else { Mark "Node.js v$ver（已经装了）" $true }
   $npm = Join-Path (Split-Path $node) 'npm.cmd'
