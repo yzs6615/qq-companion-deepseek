@@ -3,11 +3,16 @@
 一个住在你电脑里、用 QQ 小号跟你聊天的 AI 伙伴：有记性、有情绪、熟了会贫、会主动找你，没人理它的时候会自己找事做。
 大脑是 DeepSeek（通过 DSH），QQ 这头用 NapCat。只支持 Windows。
 
-## 下载安装
+## 下载
 
-1. 点这个页面上绿色的 **Code → Download ZIP**，下载后解压。
-2. 双击 **安装.cmd**（会弹一次管理员确认），按提示填：给它起的名字、机器人的 QQ 号、你的 QQ 号、DeepSeek API Key。
-3. 勾要哪些功能，点开始安装。安装器会在线下载 Node.js、DSH、NapCat，一共几百 MB。
+- **离线安装包（推荐）**：在 [Releases](https://github.com/yzs6615/qq-companion-deepseek/releases/latest) 里下 `qq-companion-deepseek-offline-*.zip`（约 230MB）。自带 Node.js 24 和 DSH，装的时候不用再下它们，装好约 1.2GB。
+- **在线安装包**：点这个页面上绿色的 **Code → Download ZIP**（几百 KB）。装的时候会在线下载 Node.js 和 DSH，一共几百 MB。
+
+## 安装
+
+1. 解压，双击 **安装.cmd**（会弹一次管理员确认），按提示填：给它起的名字、机器人的 QQ 号、你的 QQ 号、DeepSeek API Key。
+2. 勾要哪些功能，点开始安装。
+3. 装到 NapCat 那一步，会自动打开浏览器下载 `NapCat.Shell.Windows.Node.zip`（约 120MB）。NapCat 不让别的软件转发，所以要从它的官网下。下好放在“下载”文件夹就行，安装器会自己找到、接着装好；GitHub 下不动就点安装窗口里的“国内加速链接”。
 4. 桌面上会多一个快捷方式，双击启动，第一次用手机 QQ 登录**机器人那个号**扫码。
 
 装之前要准备：
@@ -36,3 +41,4 @@
 - 聊天记录、记住的事、日记都只存在本机的 `agent-bridge\data\` 里；API Key 存在 `agent-bridge\.env`，别发给别人。
 - 只把信得过的 QQ 号加进白名单：刷 B站、手机控制、听声音这些功能会让它在你电脑上执行命令。
 - 发语音、唱歌只用你自己的声音，或者本人同意的声音。
+- 离线包里自带的 Node.js 是 MIT 许可证，全文在 `tools\node\LICENSE`；DSH（MIT）和它的依赖各自的许可证在 `agent-bridge\node_modules` 里。

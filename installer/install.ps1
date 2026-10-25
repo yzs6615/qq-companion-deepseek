@@ -1,5 +1,6 @@
 ﻿# QQ 机器人一键安装：选位置 → 填名字/QQ/key → 勾功能 → 自动装好 → 桌面快捷方式。
-# 只带代码；Node.js、DSH、NapCat 和各功能要的东西安装时在线下载（可选国内镜像）。
+# 在线包只带代码，Node.js、DSH、NapCat 安装时在线下载（可选国内镜像）；离线包（根目录有 runtime.zip）自带 Node.js 和 DSH。
+# NapCat 两种包都不带：装的时候打开官网下载链接，你在浏览器里下好，安装器自己找到、解开、配置。
 #   -Answers <json>   不弹窗，按 json 里的答案装（测试 / 批量用）
 #   -Cache <dir>      先在这个目录里找已经下好的文件（按文件名），找不到再下载
 #   -Shot <dir>       每个页面截一张图（检查界面用）
@@ -39,7 +40,9 @@ $Features = @(
   @{ id = 'sing';      name = '唱歌';                 def = $false; mb = 0;   desc = '发提前转好的歌（要另外装 Seed-VC 并用声音训练，安装包不带模型）' }
   @{ id = 'radio';     name = '深夜电台';             def = $true;  mb = 0;   desc = '说“开台”她就录一期两三分钟的语音节目，配节目卡和一首歌（没开发语音就发文字版）' }
 )
-$CoreMB = 30 + 500 + 125   # Node.js（没装才下）+ DSH + NapCat
+$runtimeZip = Join-Path (Split-Path $here) 'runtime.zip'   # 离线包自带的 Node.js 24 + DSH
+$offline = Test-Path $runtimeZip
+$CoreMB = if ($offline) { 120 } else { 30 + 500 + 125 }   # 离线包只要下 NapCat；在线包：Node.js（没装才下）+ DSH + NapCat
 
 # ── 小工具 ───────────────────────────────────────────────────────────────
 function Read-EnvFile([string]$path) {
@@ -108,6 +111,96 @@ function Say([string]$m) {
 }
 function Set-Progress([int]$pct, [string]$what) {
   if ($script:ui) { $script:ui.bar.Value = [Math]::Max(0, [Math]::Min(100, $pct)); $script:ui.step.Text = $what; Pump }
+}
+
+# 解压：先用系统自带的 tar.exe（几万个小文件也就几十秒），没有就用 .NET 一个个解（慢一些）
+function Expand-Fast([string]$zip, [string]$to) {
+  New-Item -ItemType Directory -Force -Path $to | Out-Null
+  $tar = Join-Path $env:SystemRoot 'System32\tar.exe'
+  if (Test-Path $tar) {
+    $code = Invoke-Tool $tar @('-xf', $zip, '-C', $to) $to
+    if ($code -eq 0) { return }
+    Say "  tar 解压没成（退出码 $code），换个办法"
+  }
+  Add-Type -AssemblyName System.IO.Compression.FileSystem
+  $z = [IO.Compression.ZipFile]::OpenRead($zip)
+  try {
+    $n = 0
+    foreach ($e in $z.Entries) {
+      $dest = Join-Path $to ($e.FullName -replace '/', '\')
+      if ($e.FullName.EndsWith('/')) { New-Item -ItemType Directory -Force -Path $dest | Out-Null; continue }
+      New-Item -ItemType Directory -Force -Path (Split-Path $dest) | Out-Null
+      [IO.Compression.ZipFileExtensions]::ExtractToFile($e, $dest, $true)
+      if (++$n % 300 -eq 0) { Pump }
+    }
+  } finally { $z.Dispose() }
+}
+function Read-ZipText([string]$zip, [string]$name) {
+  Add-Type -AssemblyName System.IO.Compression.FileSystem
+  $z = [IO.Compression.ZipFile]::OpenRead($zip)
+  try {
+    $e = $z.GetEntry($name)
+    if (-not $e) { return '' }
+    $r = New-Object IO.StreamReader($e.Open())
+    try { return $r.ReadToEnd() } finally { $r.Dispose() }
+  } finally { $z.Dispose() }
+}
+
+# ── NapCat：两种安装包都不带（它的作者不许别的项目随便转发），装的时候从官网下 ──
+$NapCatName = 'NapCat.Shell.Windows.Node.zip'
+function NapCat-Urls([bool]$fast) {
+  $u = @("https://github.com/NapNeko/NapCatQQ/releases/latest/download/$NapCatName", "https://github.com/NapNeko/NapCatQQ/releases/download/v4.18.41/$NapCatName")
+  if ($fast) { return @("https://ghfast.top/$($u[0])") + $u }
+  return $u
+}
+# 下好的 NapCat 可能在哪：-Cache、“下载”文件夹（可能被挪过位置）、桌面、安装包旁边
+function Get-DownloadDirs {
+  if ($A.downloadsDir) { return @($A.downloadsDir) }   # 测试用
+  $dirs = @()
+  if ($Cache) { $dirs += $Cache }
+  try {
+    $d = (Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders' -ErrorAction Stop).'{374DE290-123F-4565-9164-39C4925E467B}'
+    if ($d) { $dirs += [Environment]::ExpandEnvironmentVariables($d) }
+  } catch {}
+  $dirs += (Join-Path $env:USERPROFILE 'Downloads'), [Environment]::GetFolderPath('Desktop'), (Split-Path $here)
+  return @($dirs | Where-Object { $_ -and (Test-Path $_) } | Select-Object -Unique)
+}
+# 是不是完整的 NapCat 包：能当 zip 打开、里面有 napcat\NapCatWinBootMain.exe（还在下的打不开）
+function Test-NapCatZip([string]$p) {
+  try {
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $z = [IO.Compression.ZipFile]::OpenRead($p)
+    try { return [bool](@($z.Entries | Where-Object { $_.FullName -match '(^|/)napcat/NapCatWinBootMain\.exe$' }).Count) } finally { $z.Dispose() }
+  } catch { return $false }
+}
+function Find-NapCatZip {
+  foreach ($d in Get-DownloadDirs) {
+    $hit = Get-ChildItem -Path $d -Filter 'NapCat.Shell.Windows.Node*.zip' -File -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Where-Object { Test-NapCatZip $_.FullName } | Select-Object -First 1
+    if ($hit) { return $hit.FullName }
+  }
+  return $null
+}
+# 有界面时：浏览器打开官网下载链接，安装页上提示一下；每秒看一眼下载文件夹，下好了就接着装。也能自己选文件，或者先跳过。
+function Wait-NapCatDownload([bool]$fast) {
+  Start-Process (NapCat-Urls $fast)[0]
+  Say "  NapCat 要从官网下：已经在浏览器里打开了下载链接，下好 $NapCatName 会自动接着装"
+  $script:napPick = $null; $script:napSkip = $false
+  $tLog.Top = 266; $tLog.Height = 212; $pNap.Visible = $true; Pump
+  $hit = $null
+  $until = (Get-Date).AddMinutes(60)
+  try {
+    while ((Get-Date) -lt $until -and -not $script:napSkip) {
+      if ($script:napPick) {
+        if (Test-NapCatZip $script:napPick) { $hit = $script:napPick; break }
+        Say "  选的不是完整的 $($NapCatName)：$($script:napPick)"; $script:napPick = $null
+      }
+      $hit = Find-NapCatZip
+      if ($hit) { break }
+      for ($i = 0; $i -lt 10; $i++) { Start-Sleep -Milliseconds 100; Pump }
+    }
+  } finally { $pNap.Visible = $false; $tLog.Top = 148; $tLog.Height = 330; Pump }
+  if ($hit) { Say "  下好了：$hit" } else { Say '  NapCat 先跳过了' }
+  return $hit
 }
 
 # 下载：先看 -Cache 里有没有同名文件；再按顺序试每个地址（第一个失败换下一个）
@@ -249,6 +342,23 @@ function Install-All($A) {
   [IO.File]::WriteAllText((Join-Path $dir 'AGENTS.md'), (Expand-Template ([IO.File]::ReadAllText((Join-Path $app 'installer\AGENTS.tpl.md'), [Text.Encoding]::UTF8)) $A.name $on), (New-Object Text.UTF8Encoding($false)))
   Mark '配置（.env / 人设 / AGENTS.md）' $true
 
+  # 2b. 离线包自带的 Node.js 24 和 DSH（runtime.zip）：解到安装目录的 tools\node 和 agent-bridge\node_modules；解过同一份就跳过
+  $runtimeMark = Join-Path $tools 'node\runtime.json'
+  if ($offline) {
+    Set-Progress 10 '解开自带的 Node.js 和 DSH（要几十秒）'
+    try {
+      $want = Read-ZipText $runtimeZip 'tools/node/runtime.json'
+      $have = if (Test-Path $runtimeMark) { [IO.File]::ReadAllText($runtimeMark) } else { '' }
+      if ($want -and $want -eq $have -and (Test-Path (Join-Path $app 'node_modules\@deepseek-ai\dsh\lib\bin.js'))) { Say '  自带的 Node.js 和 DSH 已经解开过了' }
+      else {
+        Remove-Item (Join-Path $app 'node_modules') -Recurse -Force -ErrorAction SilentlyContinue
+        Expand-Fast $runtimeZip $dir
+        if (-not (Test-Path (Join-Path $tools 'node\node.exe')) -or -not (Test-Path (Join-Path $app 'node_modules\@deepseek-ai\dsh\lib\bin.js'))) { throw '解完没找到 node.exe 或 DSH' }
+        Say '  解开了自带的 Node.js 和 DSH'
+      }
+    } catch { Mark 'Node.js 和 DSH（安装包自带的没解开）' $false $_.Exception.Message; return $results }
+  }
+
   # 3. Node.js：要 24 以上，低了就装 Node 24。DSH 在 22.11 这种旧版上会悄悄跑不起来（没输出也不报错），24 实测能跑。
   # 找哪个 node 跟启动器、守护一样：先 C:\Program Files\nodejs，再 PATH，免得检查的和实际用的不是同一个。
   Set-Progress 12 'Node.js'
@@ -256,6 +366,8 @@ function Install-All($A) {
   $nodeMin = 24
   function Find-Node {
     if ($A.nodeExe) { return $A.nodeExe }   # 测试用：当成电脑上装的就是这个
+    $own = Join-Path $tools 'node\node.exe'   # 离线包自带的，不碰系统里装的
+    if (Test-Path $own) { return $own }
     $pf = 'C:\Program Files\nodejs\node.exe'
     if (Test-Path $pf) { return $pf }
     return Find-Exe @('node')
@@ -280,7 +392,7 @@ function Install-All($A) {
       if (-not (Test-NodeNew $now)) { throw "装完还是$(if ($now) { " v$now" } else { '找不到 node' })（msiexec 退出码 $code）" }
       Mark "Node.js v$now$(if ($ver) { "（原来的 v$ver 太旧，换了新的）" })" $true
     } catch { Mark 'Node.js' $false $_.Exception.Message; return $results }
-  } else { Mark "Node.js v$ver（已经装了）" $true }
+  } else { Mark "Node.js v$ver（$(if ($node -like "$tools\*") { '安装包自带' } else { '已经装了' })）" $true }
   $npm = Join-Path (Split-Path $node) 'npm.cmd'
 
   # 4. DSH 和依赖
@@ -288,6 +400,7 @@ function Install-All($A) {
   $npmArgs = @('install', '--omit=dev', '--no-audit', '--no-fund')
   if ($mirror) { $npmArgs += @('--registry', 'https://registry.npmmirror.com') }
   if ($A.skipNpm) { Mark 'DSH（测试：跳过 npm）' $true }
+  elseif ((Test-Path $runtimeMark) -and (Test-Path (Join-Path $app 'node_modules\@deepseek-ai\dsh\lib\bin.js'))) { Mark 'DSH（安装包自带）' $true }
   else {
     $code = Invoke-Tool $npm $npmArgs $app
     if ($code -ne 0 -or -not (Test-Path (Join-Path $app 'node_modules\@deepseek-ai\dsh\lib\bin.js'))) { Mark 'DSH' $false "npm 退出码 $code"; return $results }
@@ -313,25 +426,25 @@ function Install-All($A) {
   [IO.File]::WriteAllText((Join-Path $prof 'cordis.patch.yml'), $patch, (New-Object Text.UTF8Encoding($false)))
   Mark 'DSH 配置' $true
 
-  # 6. NapCat
-  Set-Progress 50 'NapCat（约 125MB）'
+  # 6. NapCat：先找现成下好的；有界面就打开官网下载链接，等你在浏览器里下好；没界面（批量装）直接下
+  Set-Progress 50 'NapCat'
   $napApp = Join-Path $tools 'napcat\app'
   if (-not (Test-Path (Join-Path $napApp 'napcat\NapCatWinBootMain.exe'))) {
     try {
-      $zip = Join-Path $env:TEMP 'NapCat.Shell.Windows.Node.zip'
-      $urls = @()
-      try {
-        $wc = New-Object Net.WebClient; $wc.Headers.Add('User-Agent', 'qqbot-installer'); $wc.Encoding = [Text.Encoding]::UTF8
-        $rel = $wc.DownloadString('https://api.github.com/repos/NapNeko/NapCatQQ/releases/latest') | ConvertFrom-Json
-        $asset = $rel.assets | Where-Object { $_.name -eq 'NapCat.Shell.Windows.Node.zip' } | Select-Object -First 1
-        if ($asset) { $urls += $asset.browser_download_url }
-      } catch { Say '  GitHub 接口连不上，用固定版本 v4.18.41' }
-      if (-not $urls) { $urls += 'https://github.com/NapNeko/NapCatQQ/releases/download/v4.18.41/NapCat.Shell.Windows.Node.zip' }
-      if ($mirror) { $urls = @($urls | ForEach-Object { "https://ghfast.top/$_" }) + $urls }
-      Get-File $urls $zip 'NapCat'
-      New-Item -ItemType Directory -Force -Path $napApp | Out-Null
-      Expand-Archive -Path $zip -DestinationPath $napApp -Force
-      Mark 'NapCat' $true
+      $zip = Find-NapCatZip
+      if ($zip) { Say "  找到下好的 NapCat：$zip" }
+      elseif ($script:ui) { $zip = Wait-NapCatDownload $mirror }
+      else {
+        $zip = Join-Path $env:TEMP $NapCatName
+        Get-File (NapCat-Urls $mirror) $zip 'NapCat（约 120MB）'
+      }
+      if (-not $zip) { Mark 'NapCat' $false "还没下：从官网下好 $NapCatName（放在“下载”文件夹就行），再运行一次 agent-bridge\installer\修改设置.cmd，会自动找到并配置好" }
+      else {
+        Set-Progress 55 '解开 NapCat'
+        Expand-Fast $zip $napApp
+        if (-not (Test-Path (Join-Path $napApp 'napcat\NapCatWinBootMain.exe'))) { throw "解开后没找到 NapCatWinBootMain.exe，下的可能不是 $NapCatName" }
+        Mark 'NapCat' $true
+      }
     } catch { Mark 'NapCat' $false $_.Exception.Message }
   } else { Mark 'NapCat（已经有了）' $true }
   if (Test-Path (Join-Path $napApp 'napcat\config')) {
@@ -518,7 +631,7 @@ foreach ($f in $Features) {
 $lSize = New-Label '' 32 ($y + 4) 9 ([System.Drawing.FontStyle]::Regular) $blue; $p3.Controls.Add($lSize)
 function Update-Size {
   $mb = $CoreMB; foreach ($f in $Features) { if ($checks[$f.id].Checked) { $mb += $f.mb } }
-  $lSize.Text = "大约要下载 $mb MB（已经装了的会跳过）"
+  $lSize.Text = $(if ($offline) { "大约要下载 $mb MB（Node.js 和 DSH 安装包里自带；NapCat 装的时候会打开官网让你下）" } else { "大约要下载 $mb MB（已经装了的会跳过）" })
 }
 foreach ($c in $checks.Values) { $c.Add_CheckedChanged({ Update-Size }) }
 Update-Size
@@ -544,6 +657,21 @@ $lSub = New-Label '' 32 120 9 ([System.Drawing.FontStyle]::Regular) $gray; $p5.C
 $tLog = New-Object System.Windows.Forms.TextBox; $tLog.Multiline = $true; $tLog.ReadOnly = $true; $tLog.ScrollBars = 'Vertical'
 $tLog.Location = New-Object System.Drawing.Point(32, 148); $tLog.Size = New-Object System.Drawing.Size(576, 330); $tLog.Font = New-Object System.Drawing.Font('Consolas', 9); $tLog.BackColor = [System.Drawing.Color]::White
 $p5.Controls.Add($tLog)
+# NapCat 要自己从官网下的时候，安装页上多出来的提示（平时藏着）
+$pNap = New-Object System.Windows.Forms.Panel; $pNap.Location = New-Object System.Drawing.Point(32, 148); $pNap.Size = New-Object System.Drawing.Size(576, 110)
+$pNap.BackColor = [System.Drawing.Color]::FromArgb(255, 248, 225); $pNap.Visible = $false; $p5.Controls.Add($pNap); $pNap.BringToFront()
+$pNap.Controls.Add((New-Label "NapCat 要从它的官网下（它不许别的软件转发）。已经在浏览器里打开了下载链接，下好 $NapCatName 会自动接着装，不用管这个窗口。" 12 8 9.5 ([System.Drawing.FontStyle]::Regular) $ink 552))
+$aNap = New-Object System.Windows.Forms.LinkLabel; $aNap.Text = '下载没开始？打开 NapCat 官网'; $aNap.AutoSize = $true; $aNap.Location = New-Object System.Drawing.Point(12, 58); $pNap.Controls.Add($aNap)
+$aNap.Add_LinkClicked({ Start-Process 'https://github.com/NapNeko/NapCatQQ/releases/latest' })
+$aNapFast = New-Object System.Windows.Forms.LinkLabel; $aNapFast.Text = 'GitHub 太慢？用国内加速链接下'; $aNapFast.AutoSize = $true; $aNapFast.Location = New-Object System.Drawing.Point(12, 82); $pNap.Controls.Add($aNapFast)
+$aNapFast.Add_LinkClicked({ Start-Process (NapCat-Urls $true)[0] })
+$bNapPick = New-Object System.Windows.Forms.Button; $bNapPick.Text = '下好了，自己选文件'; $bNapPick.Location = New-Object System.Drawing.Point(300, 64); $bNapPick.Size = New-Object System.Drawing.Size(150, 30); $pNap.Controls.Add($bNapPick)
+$bNapPick.Add_Click({
+  $dlg = New-Object System.Windows.Forms.OpenFileDialog; $dlg.Title = "选 $NapCatName"; $dlg.Filter = 'NapCat 安装包|NapCat*.zip|zip 文件|*.zip'
+  if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { $script:napPick = $dlg.FileName }
+})
+$bNapSkip = New-Object System.Windows.Forms.Button; $bNapSkip.Text = '先跳过'; $bNapSkip.Location = New-Object System.Drawing.Point(462, 64); $bNapSkip.Size = New-Object System.Drawing.Size(100, 30); $pNap.Controls.Add($bNapSkip)
+$bNapSkip.Add_Click({ $script:napSkip = $true })
 
 # 页 6：完成
 $p6 = New-Page
@@ -647,7 +775,11 @@ if ($Shot) {
     foreach ($i in 0..3) { Show-Page $i; Start-Sleep -Milliseconds 200 }
     $checks['phone'].Checked = $true; $checks['voice'].Checked = $true; Show-Page 3
     $script:ui = @{ log = $tLog; bar = $bar; step = $lStep; sub = $lSub }
-    Show-Page 4; $lStep.Text = '安装 DSH（约 500MB，会久一点）'; $bar.Value = 35; Say '✓ 程序文件'; Say '✓ Node.js v22（已经装了）'; Show-Page 4
+    # 安装页：截的是等 NapCat 下载时的样子（提示框露出来）
+    Show-Page 4; $lStep.Text = 'NapCat'; $bar.Value = 50; Say '✓ 程序文件'; Say '✓ Node.js v24.14.1（安装包自带）'; Say '✓ DSH（安装包自带）'
+    Say "  NapCat 要从官网下：已经在浏览器里打开了下载链接，下好 $NapCatName 会自动接着装"
+    $pNap.Visible = $true; $tLog.Top = 266; $tLog.Height = 212; Show-Page 4
+    $pNap.Visible = $false; $tLog.Top = 148; $tLog.Height = 330
     $lDoneText.Text = "✓ 程序文件`r`n✓ Node.js`r`n✓ DSH`r`n`r`n桌面上有两个快捷方式：…"; Show-Page 5
     $form.Close()
   })

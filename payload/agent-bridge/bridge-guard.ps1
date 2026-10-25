@@ -12,7 +12,8 @@ $data     = if ($env:BRIDGE_DATA) { $env:BRIDGE_DATA } else { Join-Path $root 'd
 $log      = Join-Path $data 'bridge.log'
 $errLog   = Join-Path $data 'bridge.stderr.log'
 $stopFlag = Join-Path $data 'bridge.stop'
-if (-not $Node) { $Node = if (Test-Path 'C:\Program Files\nodejs\node.exe') { 'C:\Program Files\nodejs\node.exe' } else { (Get-Command node).Source } }
+$ownNode  = Join-Path $root '..\tools\node\node.exe'   # 离线安装包自带的
+if (-not $Node) { $Node = if (Test-Path $ownNode) { (Resolve-Path $ownNode).Path } elseif (Test-Path 'C:\Program Files\nodejs\node.exe') { 'C:\Program Files\nodejs\node.exe' } else { (Get-Command node).Source } }
 New-Item -ItemType Directory -Force -Path $data | Out-Null
 
 # Same line format as bridge.mjs: [UTC ISO time] message, UTF-8 without BOM.

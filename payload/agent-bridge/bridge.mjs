@@ -2342,6 +2342,9 @@ function runAgent(prompt, sessionId, opts = {}) {
     args.push(prompt);
 
     const childEnv = { ...process.env, DSH_HOME: cfg.dshHome };
+    // 她在命令行里敲的 node（刷 B站、听歌那些脚本）要跟 bridge 用同一个：离线安装包自带的 Node 不在系统 PATH 里
+    const pathKey = Object.keys(childEnv).find((k) => k.toUpperCase() === 'PATH') || 'PATH';
+    childEnv[pathKey] = `${path.dirname(process.execPath)}${path.delimiter}${childEnv[pathKey] || ''}`;
     const mode = opts.permissionMode || cfg.permissionMode;
     if (mode) childEnv.DSH_PERMISSION_MODE = mode;
     if (cfg.apiKey) childEnv.DEEPSEEK_API_KEY = cfg.apiKey;

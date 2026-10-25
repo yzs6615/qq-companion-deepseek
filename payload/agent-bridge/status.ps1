@@ -276,7 +276,8 @@ function Update-Ui {
   }
 }
 $btnFeat.Add_Click({
-  $node = if (Test-Path 'C:\Program Files\nodejs\node.exe') { 'C:\Program Files\nodejs\node.exe' } else { 'node' }
+  $ownNode = Join-Path $root '..\tools\node\node.exe'   # 离线安装包自带的
+  $node = if (Test-Path $ownNode) { (Resolve-Path $ownNode).Path } elseif (Test-Path 'C:\Program Files\nodejs\node.exe') { 'C:\Program Files\nodejs\node.exe' } else { 'node' }
   Start-Process -FilePath $node -ArgumentList "`"$(Join-Path $root 'scripts\features.mjs')`"" -WorkingDirectory $root -WindowStyle Hidden
 })
 $btnRefresh.Add_Click({ $btnRefresh.Enabled = $false; Update-Ui; $btnRefresh.Enabled = $true })
