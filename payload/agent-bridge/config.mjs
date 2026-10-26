@@ -137,6 +137,26 @@ export const cfg = {
   moodAvatar: (env.MOOD_AVATAR || 'false') === 'true', // 心情头像：心情变了换 QQ 头像（图放 data/avatars/，按心情起名）
   moodAvatarMaxDay: Number(env.MOOD_AVATAR_MAX_DAY ?? 4), // 一天最多换几次（换太勤小号容易被风控）
   moodAvatarGapMin: Number(env.MOOD_AVATAR_GAP_MIN ?? 90), // 两次之间至少隔多少分钟
+  // 电脑室友：看得见这台电脑在放什么歌、开着什么游戏、开了多久、人在不在电脑前；只跟电脑的主人提
+  pcBuddy: (env.PC_BUDDY || 'false') === 'true',
+  pcOwner: env.PC_OWNER || '', // 电脑是谁的 QQ（默认 PROACTIVE_QQ 第一个）
+  pcMaxDay: Number(env.PC_MAX_DAY ?? 3), // 一天最多因为电脑上的事主动说几句
+  pcSongProb: Number(env.PC_SONG_PROB ?? 0.12), // 新放一首歌时顺口说一句的概率（同一首这周放到第 3 遍必说）
+  pcCheckMs: Number(env.PC_CHECK_MS ?? 120_000),
+  // 做梦：早上醒来有时记得昨晚的梦（最近的事拼的），今天第一次聊天、或者早安时顺口说
+  dream: (env.DREAM || 'false') === 'true',
+  dreamProb: Number(env.DREAM_PROB ?? 0.5), // 每天每个人做梦的概率
+  dreamUntil: Number(env.DREAM_UNTIL ?? 12), // 睡醒（SLEEP_END）到几点之间做梦；过了这个点再三个小时就不提了
+  dreamCheckMs: Number(env.DREAM_CHECK_MS ?? 600_000),
+  // 现场照：问她在干嘛时，可能发一张“现在的她”（data/scene/bg 房间背景 × data/scene/pose 动作）
+  photo: (env.PHOTO || 'false') === 'true',
+  photoMaxDay: Number(env.PHOTO_MAX_DAY ?? 5),
+  // 每周一封信：每周某天晚上给 PROACTIVE_QQ 写一封信，信纸用百炼通义万相画（要 DASHSCOPE_API_KEY，没有就用素纸）
+  letter: (env.LETTER || 'false') === 'true',
+  letterWeekday: Number(env.LETTER_WEEKDAY ?? 0), // 0 = 周日
+  letterHour: Number(env.LETTER_HOUR ?? 21),
+  letterModel: env.LETTER_IMAGE_MODEL || 'wanx2.1-t2i-turbo',
+  letterCheckMs: Number(env.LETTER_CHECK_MS ?? 600_000),
   anniversary: (env.ANNIVERSARY || 'true') !== 'false', // 认识 100 天、生日这种日子
   meetDate: env.MEET_DATE || '', // 手动指定认识的日子：qq:2025-05-15，多个用逗号；不填就用第一次聊天那天
   weather: (env.WEATHER || 'true') !== 'false', // 对方那边的天气（Open-Meteo，免费不要 key）
