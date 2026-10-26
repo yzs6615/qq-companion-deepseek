@@ -61,8 +61,9 @@ export const cfg = {
   autonomyIdleMin: Number(env.AUTONOMY_IDLE_MIN ?? 20), // 对方这么多分钟内找过它，这小时就不自己玩（在陪人聊呢）
   proactiveLLM: (env.PROACTIVE_LLM || 'true') !== 'false',
   // ── 拟人行为 ──
-  mergeMs: Number(env.MERGE_MS ?? 3000), // 连发合并的等待时间，0 关闭
-  mergeMaxMs: Number(env.MERGE_MAX_MS ?? 10_000),
+  mergeMs: Number(env.MERGE_MS ?? 5000), // 连发合并：对方停这么久没再发才回（手机打字一句要好几秒），0 关闭
+  mergeMaxMs: Number(env.MERGE_MAX_MS ?? 15_000),
+  busyNoteMs: Number(env.BUSY_NOTE_MS ?? 45_000), // 上一轮忙了这么久还没回完、对方又来消息，才说一句“手上还有一个 等我下”（一轮最多一次）
   typingMsPerChar: Number(env.TYPING_MS_PER_CHAR ?? 130), // 0 关闭打字延迟
   inputStatus: (env.INPUT_STATUS || 'true') !== 'false', // 让对方看到“正在输入”
   markRead: (env.MARK_READ || 'true') !== 'false',

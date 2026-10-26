@@ -2804,6 +2804,18 @@ async function handleEvent(ev) {
 // 安静 MERGE_MS 之后一起交给模型；睡觉时段（SLEEP_START~SLEEP_END）有一定概率晚几分钟再回。
 const batches = new Map(); // chatKey -> { parts, firstAt, extra, timer }
 const lastAnswer = new Map(); // chatKey -> { text, at }，判断“好的”是不是在回答问题
+const busyRuns = new Map(); // chatKey -> { since, nudges, lastNudge, noted }：正在回的这一轮
+const BUSY_LINES = ['等下 上一个还没弄完', '手上还有一个 等我下', '别急 一个一个来'];
+
+/** 这一轮真忙了挺久（看视频、弄手机这种）对方又来消息，才吭一声，一轮最多一次；平常回得慢点不用解释。 */
+function noteBusy(chatKey, ev) {
+  const run = busyRuns.get(chatKey);
+  if (!run || run.noted || Date.now() - run.since < cfg.busyNoteMs) return;
+  run.noted = true;
+  run.nudges++; // 跟看门狗的“还在弄”算在一起，别接连冒两句
+  run.lastNudge = Date.now();
+  reply(ev, pick(BUSY_LINES)).catch(() => {});
+}
 const IMG_ONLY = '（发来图片）';
 
 function sleepDelayMs() {
@@ -2843,6 +2855,13 @@ function enqueueTurn(chatKey, item) {
 function flushTurn(chatKey) {
   const b = batches.get(chatKey);
   if (!b) return;
+  // 上一轮还没回完（模型还在想，或者正一段段“打字”发出去）：新消息先攒着，回完一起看、一起回，
+  // 跟真人一样，不用每来一条就喊一声“等下”。
+  if (activeChats.has(chatKey)) {
+    noteBusy(chatKey, b.parts[b.parts.length - 1].ev);
+    b.timer = setTimeout(() => flushTurn(chatKey), 1000);
+    return;
+  }
   batches.delete(chatKey);
   const last = b.parts[b.parts.length - 1];
   const real = b.parts.filter((p) => p.text !== IMG_ONLY);
@@ -2872,17 +2891,15 @@ function groupMovedOn(ev) {
 }
 
 async function processTurn({ ev, text, images, isGroup, chatKey, who, ids, stickers = [] }) {
-  // 上一条还在跑的时候别装死，先回一句“排队中”。
-  if (activeChats.has(chatKey)) {
-    await reply(ev, pick(['等下 上一个还没弄完', '手上还有一个 等我下', '别急 一个一个来']));
-  }
-
   await runQueued(chatKey, async () => {
     activeChats.add(chatKey);
-    let nudges = 0;
-    // 长任务/锁屏卡住时，每 60 秒冒个泡，最多两次，别让对面干等。
+    const run = { since: Date.now(), nudges: 0, lastNudge: 0, noted: false };
+    busyRuns.set(chatKey, run);
+    // 长任务/锁屏卡住时，每 60 秒冒个泡，最多两次（刚说过“手上还有一个”就跳过这次），别让对面干等。
     const watchdog = setInterval(() => {
-      if (nudges++ >= 2) return;
+      if (run.nudges >= 2 || Date.now() - run.lastNudge < 40_000) return;
+      run.nudges++;
+      run.lastNudge = Date.now();
       reply(ev, pick(['还在弄', '等下，有点慢', '别急，卡了一下'])).catch(() => {});
     }, 60_000);
     const phoneWatch = { on: true };
@@ -2977,6 +2994,7 @@ async function processTurn({ ev, text, images, isGroup, chatKey, who, ids, stick
       phoneWatch.on = false;
       clearInterval(watchdog);
       activeChats.delete(chatKey);
+      busyRuns.delete(chatKey);
       activeRuns--;
     }
   });
