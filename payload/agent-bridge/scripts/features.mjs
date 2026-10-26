@@ -19,6 +19,7 @@ const argv = process.argv.slice(2);
 const outIdx = argv.indexOf('--out');
 const DATA_DIR = env.BRIDGE_DATA ? path.resolve(env.BRIDGE_DATA) : path.join(ROOT, 'data');
 const STICKER_DIR = env.STICKER_DIR ? path.resolve(env.STICKER_DIR) : path.join(DATA_DIR, 'stickers');
+const AVATAR_DIR = env.MOOD_AVATAR_DIR ? path.resolve(env.MOOD_AVATAR_DIR) : path.join(DATA_DIR, 'avatars');
 const out = path.resolve(outIdx >= 0 && argv[outIdx + 1] ? argv[outIdx + 1] : path.join(DATA_DIR, 'features.html'));
 
 const readJson = (f, fallback) => {
@@ -98,6 +99,7 @@ const features = [
     ['等你回', on(cfg.chase), `问了没回 ${cfg.chaseMinMin}~${cfg.chaseMaxMin} 分钟后 ${Math.round(cfg.chaseProb * 100)}% 会追一句`, '她问了你一句、你半天没回，偶尔追一句“人呢”“？”，熟了会说“已读不回是吧”；一个问题最多追一次。你说了去洗澡、睡了、上课这种就不追，半夜也不追。'],
     ['发现撤回', on(cfg.recall), `熟人撤回后 ${Math.round(cfg.recallTeaseProb * 100)}% 会调侃一句`, '你撤回一条消息：还没回的就不回了；私聊里熟一点的人，她偶尔会说“撤回了啥 我都看到了”。群里不调侃。'],
     ['在线状态和个签', on(cfg.onlineStatus || cfg.longnick), (() => { const p = state._presence || {}; return [p.name ? `现在：${p.name}` : '', p.sign ? `个签：${p.sign}` : ''].filter(Boolean).join(' · ') || '还没改过'; })(), 'QQ 在线状态跟着她过日子变：半夜睡觉中、熬夜中、自己找事做时摸鱼中、唱完歌听歌中，平时跟心情（元气满满、无聊中、想静静…）。每晚写完日记换一句个性签名（不带任何人名和私事）。'],
+    ['心情头像', on(cfg.moodAvatar), (() => { const a = state._avatar || {}; const n = (() => { try { return fs.readdirSync(AVATAR_DIR).filter((f) => /\.(png|jpe?g|webp)$/i.test(f)).length; } catch { return 0; } })(); return `${n} 张图${a.name ? ` · 现在：${a.name}（${a.day === dayKey() ? `今天换了 ${a.count} 次` : '今天还没换'}）` : ''}`; })(), `她心情变了，QQ 头像跟着换成对应的图：${AVATAR_DIR} 里按名字放图（平常、开心、生气、委屈、困、睡觉、得意、烦、无聊、懒，没有的就用相近的，最后用“平常”），半夜换成“睡觉”。一天最多换 ${cfg.moodAvatarMaxDay} 次、两次至少隔 ${cfg.moodAvatarGapMin} 分钟，免得小号被风控。`],
     ['纪念日和天气', on(cfg.anniversary || cfg.weather), cfg.weatherCity ? `默认城市：${cfg.weatherCity}` : '在 QQ 里发 /城市 杭州 告诉她你在哪', '认识第 100 天、周年、你的生日（/生日 5-20）那天她心里知道，上午会主动说一句；你那边下雨、降温、很热很冷时会顺口提醒（天气来自 Open-Meteo，免费）。认识的日子可以在 .env 写 MEET_DATE=QQ号:2025-05-15。'],
     ['看懂视频和文件', on(cfg.media), `${cfg.mediaMaxMB}MB 以内`, '发视频：挑几帧画面拼图给她看，10 分钟以内的再听一下说了啥。发文件：文本、PDF、Word、Excel、PPT 直接读成字，图片当图片看，别的告诉她存在哪。'],
     ['看懂引用', 'on', '引用消息时会把原文（和里面的图）一起给它看', 'QQ 里引用/回复某条消息，它能看到你引用的是谁说的哪句话；引用的是它自己说过的话它也知道。群里没 @ 它、但引用了它的话，也算在跟它说话。'],

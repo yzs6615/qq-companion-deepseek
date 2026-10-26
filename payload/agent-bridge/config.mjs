@@ -134,6 +134,9 @@ export const cfg = {
   recallTeaseProb: Number(env.RECALL_TEASE_PROB ?? 0.5),
   onlineStatus: (env.ONLINE_STATUS || 'true') !== 'false', // QQ 在线状态跟着作息和心情变（睡觉中/摸鱼中/元气满满…）
   longnick: (env.LONGNICK || 'true') !== 'false', // 每晚写完日记顺手改一句个性签名
+  moodAvatar: (env.MOOD_AVATAR || 'false') === 'true', // 心情头像：心情变了换 QQ 头像（图放 data/avatars/，按心情起名）
+  moodAvatarMaxDay: Number(env.MOOD_AVATAR_MAX_DAY ?? 4), // 一天最多换几次（换太勤小号容易被风控）
+  moodAvatarGapMin: Number(env.MOOD_AVATAR_GAP_MIN ?? 90), // 两次之间至少隔多少分钟
   anniversary: (env.ANNIVERSARY || 'true') !== 'false', // 认识 100 天、生日这种日子
   meetDate: env.MEET_DATE || '', // 手动指定认识的日子：qq:2025-05-15，多个用逗号；不填就用第一次聊天那天
   weather: (env.WEATHER || 'true') !== 'false', // 对方那边的天气（Open-Meteo，免费不要 key）

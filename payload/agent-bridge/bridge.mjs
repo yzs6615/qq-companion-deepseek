@@ -618,6 +618,44 @@ function clearBusy(name) {
   presence.busyUntil = 0;
   updatePresence().catch(() => {});
 }
+
+// ── 心情头像：心情变了，QQ 头像跟着换 ─────────────────────────────────────
+// 图放 AVATAR_DIR，按名字找：睡觉时段用“睡觉”，平时按心情（AVATAR_FOR，前面的没有就往后找，最后都用“平常”），一张都没有就不换。
+// 一天最多换 MOOD_AVATAR_MAX_DAY 次、两次至少隔 MOOD_AVATAR_GAP_MIN 分钟：换太勤小号容易被风控。
+const AVATAR_DIR = env.MOOD_AVATAR_DIR ? path.resolve(env.MOOD_AVATAR_DIR) : path.join(DATA_DIR, 'avatars');
+const AVATAR_FOR = {
+  开心: ['开心'], 兴奋: ['开心'], 平静: ['平常'], 无聊: ['无聊'], 懒: ['懒', '困'], 嘴贫: ['得意', '开心'],
+  烦: ['烦', '生气'], 有点丧: ['委屈'], 委屈: ['委屈'], 生气: ['生气'], 困: ['困'],
+};
+const avatarState = { fails: 0 };
+function pickAvatar() {
+  const names = inSleepHours() ? ['睡觉', '困'] : AVATAR_FOR[myState().mood] || [];
+  for (const name of [...names, '平常']) {
+    for (const ext of ['.png', '.jpg', '.jpeg', '.webp']) {
+      const file = path.join(AVATAR_DIR, name + ext);
+      if (fs.existsSync(file)) return { name, file };
+    }
+  }
+  return null;
+}
+async function updateAvatar() {
+  if (!cfg.moodAvatar || avatarState.fails >= 3 || !ws || ws.readyState !== 1) return;
+  const pick = pickAvatar();
+  const a = state._avatar || (state._avatar = {});
+  if (!pick || a.name === pick.name) return;
+  if (a.day !== dayKey()) Object.assign(a, { day: dayKey(), count: 0 });
+  if (a.count >= cfg.moodAvatarMaxDay || Date.now() - (a.at || 0) < cfg.moodAvatarGapMin * 60_000) return;
+  try {
+    await sendRaw({ action: 'set_qq_avatar', params: { file: 'base64://' + fs.readFileSync(pick.file).toString('base64') } });
+    Object.assign(a, { name: pick.name, at: Date.now(), count: a.count + 1 });
+    avatarState.fails = 0;
+    saveState();
+    log(`头像：换成「${pick.name}」（今天第 ${a.count} 次）`);
+  } catch (err) {
+    if (++avatarState.fails >= 3) log(`头像连续换不成，这次运行先不换了：${err.message}`);
+    else log(`头像没换成: ${err.message}`);
+  }
+}
 /** 个签：所有人都看得到，带人名 / QQ 号 / AI 字样的不要。 */
 async function setLongnick(text, names = []) {
   if (!cfg.longnick) return false;
@@ -1954,6 +1992,7 @@ function setEmotion(mood, reason, chatKey = '') {
   saveState();
   log(`心情：${mood}${reason ? `（${reason}）` : ''}`);
   updatePresence().catch(() => {});
+  updateAvatar().catch(() => {});
 }
 function markStayedUp() {
   const h = new Date().getHours();
@@ -3125,6 +3164,11 @@ if (cfg.onlineStatus) {
   log('在线状态: 跟着作息和心情变');
   setTimeout(() => updatePresence(true).catch(() => {}), 15_000);
   setInterval(() => updatePresence().catch(() => {}), 5 * 60_000);
+}
+if (cfg.moodAvatar) {
+  log(`心情头像: 跟着心情换，一天最多 ${cfg.moodAvatarMaxDay} 次、至少隔 ${cfg.moodAvatarGapMin} 分钟（图在 ${AVATAR_DIR}）`);
+  setTimeout(() => updateAvatar().catch(() => {}), 20_000);
+  setInterval(() => updateAvatar().catch(() => {}), 5 * 60_000);
 }
 if (cfg.journal) {
   log(`日记: 每天 ${cfg.journalHour} 点后写一篇，聊天时带上最近 ${cfg.journalDays} 天`);
