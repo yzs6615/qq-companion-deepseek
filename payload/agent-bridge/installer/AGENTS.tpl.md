@@ -29,6 +29,23 @@ node agent-bridge/bili/bili.mjs seen                   :: 最近看过的
 - 不会发评论、点赞、投币，也不登录别人的账号。
 <!-- end -->
 
+<!-- if:sing -->
+## 学新歌
+
+被叫去学一首歌：先 `bili.mjs search 歌名` 找个音质好的完整版，然后：
+
+```bat
+node agent-bridge/sing/learn.mjs start --title 歌名 --artist 歌手 --bv BV号 --seg 104-134   :: 在后台学，马上返回
+node agent-bridge/sing/learn.mjs status 歌名                                                :: 学到哪一步了
+```
+
+- 一段 30 秒要 5 分钟左右，比一轮聊天长得多。**只能用 learn.mjs**，别直接跑 `sing/render.py`，也别用后台 job 或者等 job：
+  这一轮一结束，它们就会被一起杀掉。
+- `--seg 起-止`（秒）挑副歌，30 秒左右，可以写好几个 `--seg`。有歌词就加 `--lyrics 歌词.json`（`{"lines":[{"start","end","text"}]}`）。
+- start 完就跟对方说一句“在学了，过几分钟”，然后结束这一轮，别干等。对方再问就看 `status`。
+- 学好的歌会出现在“你学会唱的歌”里，到时候写 `[唱歌:歌名]`。同一时间只能学一首。
+<!-- end -->
+
 <!-- if:autonomy -->
 ## 刷别的（知乎、微博、听歌、看番）
 

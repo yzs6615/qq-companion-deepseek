@@ -336,6 +336,17 @@ export function computeRhythm(times, minDays = 4) {
   return { wake: med([...days.values()].map((d) => d.first)), sleep: med([...days.values()].map((d) => d.last)), days: days.size };
 }
 /**
+ * 作息被带偏：对方最近几点没动静（computeRhythm 的 sleep，从 5 点算起的分钟）→ 她的睡觉时间往那边挪几个小时。
+ * 被带偏一大半、不完全跟着；整小时，最多晚 maxLate、早 maxEarly。比如她平时 1 点睡、对方最近 3 点半才没动静 → 挪 2 小时。
+ */
+export function sleepDrift(baseStart, ownerSleepMin, maxLate = 2, maxEarly = 1) {
+  if (!Number.isFinite(ownerSleepMin)) return 0;
+  let d = ((ownerSleepMin + LOGICAL_SHIFT) % 1440) / 60 - baseStart;
+  if (d > 12) d -= 24;
+  if (d <= -12) d += 24;
+  return Math.max(-maxEarly, Math.min(maxLate, Math.round(d * 0.6)));
+}
+/**
  * 今天跟平时比有没有反常：晚睡（现在比平时没动静的点晚 45 分钟以上）、早起（今天第一条比平时早 1 小时以上）。
  * 返回 { kind: 'late'|'early', text } 或 null。
  */

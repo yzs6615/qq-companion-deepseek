@@ -60,6 +60,12 @@ export const cfg = {
   autonomyRollProb: Number(env.AUTONOMY_ROLL_PROB ?? 0.35), // 每小时掷骰子“想不想玩”的基础概率（再按心情/精神调）
   autonomyIdleMin: Number(env.AUTONOMY_IDLE_MIN ?? 20), // 对方这么多分钟内找过它，这小时就不自己玩（在陪人聊呢）
   proactiveLLM: (env.PROACTIVE_LLM || 'true') !== 'false',
+  // ChronoLife旁存时间线；不开启时沿用旧行为。
+  chronolife: env.CHRONOLIFE === 'true',
+  chronolifeTimezone: env.CHRONOLIFE_TIMEZONE || Intl.DateTimeFormat().resolvedOptions().timeZone || 'Asia/Shanghai', // 没填就用电脑的时区
+  chronolifeTickMinutes: Number(env.CHRONOLIFE_TICK_MINUTES || 30),
+  chronolifeProactive: env.CHRONOLIFE_PROACTIVE === 'true',
+  chronolifeCheckMs: Number(env.CHRONOLIFE_CHECK_MS || 0), // 测试用：bridge 多久看一次（不填就按 CHRONOLIFE_TICK_MINUTES）
   // ── 拟人行为 ──
   mergeMs: Number(env.MERGE_MS ?? 5000), // 连发合并：对方停这么久没再发才回（手机打字一句要好几秒），0 关闭
   mergeMaxMs: Number(env.MERGE_MAX_MS ?? 15_000),
@@ -134,6 +140,9 @@ export const cfg = {
   recallTeaseProb: Number(env.RECALL_TEASE_PROB ?? 0.5),
   onlineStatus: (env.ONLINE_STATUS || 'true') !== 'false', // QQ 在线状态跟着作息和心情变（睡觉中/摸鱼中/元气满满…）
   longnick: (env.LONGNICK || 'true') !== 'false', // 每晚写完日记顺手改一句个性签名
+  diyStatus: (env.DIY_STATUS || 'false') === 'true', // 自定义在线状态：名字旁边写她自己的一句话（在干嘛 / 陪你听什么 / 心情），没有具体的事就用预设的
+  sleepDrift: (env.SLEEP_DRIFT || 'false') === 'true', // 作息被带偏：电脑的主人最近老熬夜 / 早睡，她的睡觉时段跟着挪
+  sleepDriftMax: Number(env.SLEEP_DRIFT_MAX ?? 2), // 最多被带晚几个小时（带早最多 1 小时）
   moodAvatar: (env.MOOD_AVATAR || 'false') === 'true', // 心情头像：心情变了换 QQ 头像（图放 data/avatars/，按心情起名）
   moodAvatarMaxDay: Number(env.MOOD_AVATAR_MAX_DAY ?? 4), // 一天最多换几次（换太勤小号容易被风控）
   moodAvatarGapMin: Number(env.MOOD_AVATAR_GAP_MIN ?? 90), // 两次之间至少隔多少分钟
@@ -143,6 +152,17 @@ export const cfg = {
   pcMaxDay: Number(env.PC_MAX_DAY ?? 3), // 一天最多因为电脑上的事主动说几句
   pcSongProb: Number(env.PC_SONG_PROB ?? 0.12), // 新放一首歌时顺口说一句的概率（同一首这周放到第 3 遍必说）
   pcCheckMs: Number(env.PC_CHECK_MS ?? 120_000),
+  // 电脑上的她（都靠电脑室友看键盘鼠标多久没动；夜里不出声、不留条）
+  quietHours: (env.QUIET_HOURS || '23-9').split('-').map(Number), // 这几个钟头不出声、不留条、不发空间
+  awayMin: Number(env.AWAY_MIN ?? 120), // 键盘鼠标这么久没动、又动了，算“回来了”
+  speaker: (env.SPEAKER || 'false') === 'true', // 早上第一次开电脑、离开很久又回来时，用她的声音从电脑喇叭说一句（要开语音）
+  speakerMaxDay: Number(env.SPEAKER_MAX_DAY ?? 3),
+  notes: (env.NOTES || 'false') === 'true', // 离开电脑好几个小时时，她在桌面留张便条，回来时弹个通知
+  noteAfterMin: Number(env.NOTE_AFTER_MIN ?? 180),
+  drawer: (env.DRAWER || 'false') === 'true', // 桌面上“<名字>的抽屉”：写给主人的信、明信片、现场照、梦、便条、收藏的视频都放一份
+  playMusic: (env.PLAY_MUSIC || 'false') === 'true', // 用电脑上的 QQ 音乐放歌：模型写 [放歌:歌名 歌手]，主人在电脑前就直接放，不在就发链接
+  playMusicMaxDay: Number(env.PLAY_MUSIC_MAX_DAY ?? 6),
+  qqMusicExe: env.QQMUSIC_EXE || 'C:\\Program Files (x86)\\Tencent\\QQMusic\\QQMusic.exe',
   // 做梦：早上醒来有时记得昨晚的梦（最近的事拼的），今天第一次聊天、或者早安时顺口说
   dream: (env.DREAM || 'false') === 'true',
   dreamProb: Number(env.DREAM_PROB ?? 0.5), // 每天每个人做梦的概率
@@ -157,6 +177,17 @@ export const cfg = {
   letterHour: Number(env.LETTER_HOUR ?? 21),
   letterModel: env.LETTER_IMAGE_MODEL || 'wanx2.1-t2i-turbo',
   letterCheckMs: Number(env.LETTER_CHECK_MS ?? 600_000),
+  // QQ 空间说说：偶尔把自己最近干的事发一条（只写她自己的事，不写聊天内容和人名）；开着 ChronoLife 时只用它记下的虚拟事件
+  qzone: (env.QZONE || 'false') === 'true',
+  qzoneProb: Number(env.QZONE_PROB ?? 0.012), // QZONE_HOURS 里每次检查发一条的概率（10 分钟看一次，大概两天一条；一天最多一条）
+  qzoneHours: (env.QZONE_HOURS || '12-22').split('-').map(Number),
+  qzoneRight: Number(env.QZONE_RIGHT ?? 4), // 谁能看：1 所有人，4 好友，64 仅自己
+  qzoneCheckMs: Number(env.QZONE_CHECK_MS ?? 600_000),
+  // 旅行明信片：隔几周的周末她在自己的小世界里出去玩一趟（周五定去哪），周日下午给 PROACTIVE_QQ 寄一张明信片（正面百炼画当地风景）
+  postcard: (env.POSTCARD || 'false') === 'true',
+  postcardEveryWeeks: Number(env.POSTCARD_EVERY_WEEKS ?? 3),
+  postcardModel: env.POSTCARD_IMAGE_MODEL || env.LETTER_IMAGE_MODEL || 'wanx2.1-t2i-turbo',
+  postcardCheckMs: Number(env.POSTCARD_CHECK_MS ?? 600_000),
   anniversary: (env.ANNIVERSARY || 'true') !== 'false', // 认识 100 天、生日这种日子
   meetDate: env.MEET_DATE || '', // 手动指定认识的日子：qq:2025-05-15，多个用逗号；不填就用第一次聊天那天
   weather: (env.WEATHER || 'true') !== 'false', // 对方那边的天气（Open-Meteo，免费不要 key）

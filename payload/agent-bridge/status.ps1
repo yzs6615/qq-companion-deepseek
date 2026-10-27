@@ -86,7 +86,7 @@ function Get-Report {
   $guardOn = $false
   try {
     $mx = $null
-    $guardOn = [Threading.Mutex]::TryOpenExisting("Local\XiaoyuganBridgeGuard-$tag", [ref]$mx)
+    $guardOn = [Threading.Mutex]::TryOpenExisting("Local\QQBotBridgeGuard-$tag", [ref]$mx)
     if ($mx) { $mx.Dispose() }
   } catch [UnauthorizedAccessException] { $guardOn = $true } catch {}
 
@@ -177,7 +177,7 @@ if ($Text) {
 
 # ── window ────────────────────────────────────────────────────────────────
 if (-not $Shot) {   # one window at a time
-  $script:mutex = New-Object Threading.Mutex($false, 'Local\XiaoyuganStatusWindow')
+  $script:mutex = New-Object Threading.Mutex($false, 'Local\QQBotStatusWindow')
   if (-not $script:mutex.WaitOne(0)) { exit }
 }
 Add-Type -AssemblyName System.Windows.Forms

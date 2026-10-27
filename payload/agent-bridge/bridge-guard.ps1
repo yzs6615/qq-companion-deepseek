@@ -28,7 +28,7 @@ function Say([string]$m) {
 # One guard per data folder.
 $sha = [Security.Cryptography.SHA1]::Create()
 $tag = ([BitConverter]::ToString($sha.ComputeHash($utf8.GetBytes($data.ToLower()))) -replace '-', '').Substring(0, 12)
-$mutex = New-Object Threading.Mutex($false, "Local\XiaoyuganBridgeGuard-$tag")
+$mutex = New-Object Threading.Mutex($false, "Local\QQBotBridgeGuard-$tag")
 if (-not $mutex.WaitOne(0)) { exit }
 
 Remove-Item $stopFlag -Force -ErrorAction SilentlyContinue
@@ -50,6 +50,14 @@ while ($true) {
   $p.WaitForExit()
   if (Test-Path $stopFlag) { Say '收到停止标记（data\bridge.stop），不再拉起 bridge'; break }
 
+  # 退出码 3：已经有别的 bridge 在跑（不是这个守护拉起的），等它停了再接手，不算崩溃，也不刷日志
+  if ($p.ExitCode -eq 3) {
+    if (-not $waiting) { Say '已经有一个 bridge 在跑（不是我拉起的），等它停了再接手' }
+    $waiting = $true
+    Start-Sleep -Seconds 30
+    continue
+  }
+  $waiting = $false
   $alive = [int]((Get-Date) - $started).TotalSeconds
   # 很快又挂的话越等越久，免得崩溃时疯狂重启：3s → 10s → 30s → 60s → 5min
   if ($alive -lt 60) { $fails++ } else { $fails = 0 }
