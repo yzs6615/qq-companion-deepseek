@@ -6,6 +6,9 @@
  *   node agent-bridge/life/life.mjs weibo [条数]          微博热搜
  *   node agent-bridge/life/life.mjs music [飙升|热歌|新歌|原创]   网易云榜单
  *   node agent-bridge/life/life.mjs song 歌名或id          一首歌：歌词 + 网易云热评
+ *   node agent-bridge/life/life.mjs song 歌名 歌手 --lyrics-json 文件名 [--offset 秒]
+ *        学歌用：把带时间的歌词存成 sing/learn.mjs --lyrics 要的 {"lines":[{"start","end","text"}]}，
+ *        文件一律放 data/tmp/ 下面；时间按网易云原版算，B站 那版前奏长短不一样就用 --offset 挪（秒，可以是负数）
  *   node agent-bridge/life/life.mjs anime [今天|这周]       B站新番时间表
  *   node agent-bridge/life/life.mjs anime-rank            番剧排行
  *   node agent-bridge/life/life.mjs anime-watch season_id    追一部番：简介、评分、最新一集、弹幕刷得最多的、热评（番剧画面大多要会员，不看）
@@ -30,6 +33,9 @@ const API = {
   bili: env.LIFE_BILI_API || 'https://api.bilibili.com',
 };
 const CHARTS = { 飙升: 19723756, 热歌: 3778678, 新歌: 3779629, 原创: 2884035 };
+// 临时文件只放 data/tmp/（学歌的歌词 JSON 也在这）
+const TMP = path.join(path.dirname(DATA), 'tmp');
+const CREDITS = /^(作词|作曲|编曲|制作人|混音|母带|录音|和声|吉他|贝斯|鼓|弦乐|监制|出品|OP|SP)\s*[:：]/;
 
 fs.mkdirSync(DATA, { recursive: true });
 const readJson = (f, d) => {
@@ -92,7 +98,36 @@ async function music(which = '飙升') {
   console.log(`网易云${name}榜：\n${out.join('\n')}\n（想听哪首：song id 看歌词和热评）`);
 }
 
-async function song(q) {
+/** 网易云的 LRC → [{start, end, text}]（秒）。一句的结束 = 下一句开始（最多 10 秒，最后一句 5 秒）。 */
+function lrcToLines(lrc, offset = 0) {
+  const stamps = [];
+  for (const raw of String(lrc || '').split('\n')) {
+    const tags = [...raw.matchAll(/\[(\d{1,3}):(\d{1,2}(?:[.:]\d{1,3})?)\]/g)];
+    if (!tags.length) continue;
+    const text = raw.replace(/\[[^\]]*\]/g, '').trim();
+    for (const m of tags) stamps.push({ t: Number(m[1]) * 60 + Number(m[2].replace(':', '.')), text });
+  }
+  stamps.sort((a, b) => a.t - b.t);
+  const r2 = (x) => Math.round(x * 100) / 100;
+  const out = [];
+  stamps.forEach(({ t, text }, i) => {
+    if (!text || CREDITS.test(text)) return;
+    const next = stamps.slice(i + 1).find((x) => x.t > t);
+    const end = next ? Math.min(next.t, t + 10) : t + 5;
+    if (end + offset <= 0) return;
+    out.push({ start: r2(Math.max(0, t + offset)), end: r2(end + offset), text });
+  });
+  return out;
+}
+
+/** 歌词 JSON 存到哪：只认文件名，一律放 data/tmp/ 下面。 */
+function lyricsPath(name) {
+  let base = path.basename(String(name || '').replace(/\\/g, '/')) || 'lyrics.json';
+  if (!/\.json$/i.test(base)) base += '.json';
+  return path.join(TMP, base);
+}
+
+async function song(q, { lyricsJson = '', offset = 0 } = {}) {
   if (!q) throw new Error('听哪首？song 后面跟歌名或 id');
   let id = /^\d+$/.test(q) ? q : '';
   let title = '';
@@ -110,7 +145,7 @@ async function song(q) {
   const lines = String(lyr.lrc?.lyric || '')
     .split('\n')
     .map((l) => l.replace(/\[[^\]]*\]/g, '').trim())
-    .filter((l) => l && !/^(作词|作曲|编曲|制作人|混音|母带|录音|和声|吉他|贝斯|鼓|弦乐|监制|出品|OP|SP)\s*[:：]/.test(l));
+    .filter((l) => l && !CREDITS.test(l));
   const hot = (cm.hotComments || []).slice(0, 4).map((c) => `- (${c.likedCount >= 10000 ? `${(c.likedCount / 10000).toFixed(1)}万` : c.likedCount}赞) ${clip(c.content, 100)}`);
   markSeen('music', id, title || q);
   console.log(
@@ -118,6 +153,18 @@ async function song(q) {
       (lines.length ? `歌词（前 30 句）：\n${lines.slice(0, 30).join('\n')}${lines.length > 30 ? '\n…' : ''}` : '（没歌词，可能是纯音乐）') +
       (hot.length ? `\n网易云热评：\n${hot.join('\n')}` : ''),
   );
+  if (lyricsJson) {
+    const timed = lrcToLines(lyr.lrc?.lyric, offset);
+    if (!timed.length) throw new Error('这首没有带时间的歌词，学歌就别加 --lyrics 了');
+    const file = lyricsPath(lyricsJson);
+    fs.mkdirSync(TMP, { recursive: true });
+    fs.writeFileSync(file, JSON.stringify({ lines: timed }, null, 1));
+    console.log(
+      `\n学歌用的歌词存好了（${timed.length} 句，${timed[0].start}s 开始${offset ? `，挪了 ${offset}s` : ''}）：${file}\n` +
+        `学的时候加：--lyrics "${file}"\n` +
+        '（时间按网易云原版算；B站 那版前奏长短不一样，就看对不上多少秒，重跑一次加 --offset 秒）',
+    );
+  }
 }
 
 async function anime(when = '今天') {
@@ -187,12 +234,21 @@ function showSeen() {
 }
 
 const [cmd, ...rest] = process.argv.slice(2);
-const positional = rest.filter((a) => !a.startsWith('--'));
+// 带值的选项（--lyrics-json 文件、--offset 秒）的值不算进歌名
+const VALUE_OPTS = new Set(['--lyrics-json', '--offset']);
+const opt = (name) => {
+  const i = rest.indexOf(name);
+  return i >= 0 && rest[i + 1] !== undefined && !rest[i + 1].startsWith('--') ? rest[i + 1] : undefined;
+};
+const positional = rest.filter((a, i) => !a.startsWith('--') && !VALUE_OPTS.has(rest[i - 1]));
 try {
   if (cmd === 'zhihu') await zhihu(Number(positional[0]) || 15);
   else if (cmd === 'weibo') await weibo(Number(positional[0]) || 20);
   else if (cmd === 'music') await music(positional[0] || '飙升');
-  else if (cmd === 'song') await song(positional.join(' '));
+  else if (cmd === 'song') {
+    const lj = rest.includes('--lyrics-json') ? opt('--lyrics-json') || 'lyrics.json' : '';
+    await song(positional.join(' '), { lyricsJson: lj, offset: Number(opt('--offset')) || 0 });
+  }
   else if (cmd === 'anime') await anime(positional[0] || '今天');
   else if (cmd === 'anime-rank') await animeRank();
   else if (cmd === 'anime-watch') await animeWatch(positional[0]);

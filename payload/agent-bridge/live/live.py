@@ -7,16 +7,21 @@
   python live/live.py asr a.wav [--model small]
   python live/live.py watch <url> [--seconds 60] [--shots 3] [--model small]
 
-watch 会打开 Edge 到直播间，等加载后同时录音和定时截图，最后把
-音频转成文字，全部放进 data/live/<时间戳>/，并打印一行 JSON。
+watch 会单独开一个 Edge 窗口（临时配置，不碰主人自己开着的 Edge）到直播间，
+等加载后同时录音和定时截图，看完把这个窗口关掉，最后把音频转成文字，
+全部放进 data/live/<时间戳>/，并打印一行 JSON。
+一次最多看 90 秒，--seconds 写多了会截到 90。
+语音识别只用本地模型：tools/whisper-models/<大小>/model.bin（或 WHISPER_MODEL_DIR），没有就报错，不去网上下。
 """
 from __future__ import annotations
 
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import wave
@@ -36,8 +41,41 @@ try:
 except Exception:
     pass
 
-EDGE = r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
 LIVE_DIR = ROOT / "data" / "live"
+MAX_SECONDS = 90  # 一次最多看/录这么久，再长这一轮聊天就等太久了
+
+
+def find_edge() -> str | None:
+    """找 Edge：先 Program Files，再 x86，再用户目录，最后查注册表和 PATH。找不到返回 None。"""
+    cands = []
+    for var in ("ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"):
+        base = os.environ.get(var)
+        if base:
+            cands.append(Path(base) / "Microsoft" / "Edge" / "Application" / "msedge.exe")
+    for p in cands:
+        if p.exists():
+            return str(p)
+    try:
+        import winreg
+
+        for hive in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
+            try:
+                with winreg.OpenKey(hive, r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\msedge.exe") as k:
+                    val, _ = winreg.QueryValueEx(k, "")
+                    if val and os.path.exists(val):
+                        return val
+            except OSError:
+                pass
+    except ImportError:
+        pass
+    return shutil.which("msedge")
+
+
+def clamp_seconds(seconds: float) -> float:
+    if seconds > MAX_SECONDS:
+        print(f"[live] 一次最多 {MAX_SECONDS} 秒，--seconds {seconds:g} 截到 {MAX_SECONDS}", flush=True)
+        return float(MAX_SECONDS)
+    return seconds
 
 
 def now_tag() -> str:
@@ -84,13 +122,32 @@ def shot(path: Path) -> Path:
     return path
 
 
+def whisper_model_dir(model_size: str) -> Path:
+    """只用本地模型，找不到就报错，绝不自己去网上下。
+    模型目录：设了 WHISPER_MODEL_DIR 就用它（下面放 <大小>/model.bin，或者直接就是放 model.bin 的目录），
+    没设用 tools/whisper-models。"""
+    if os.environ.get("WHISPER_MODEL_DIR"):
+        base = Path(os.environ["WHISPER_MODEL_DIR"])
+        if (base / "model.bin").exists():
+            return base
+    else:
+        base = TOOLS / "whisper-models"
+    local = base / model_size
+    if not (local / "model.bin").exists():
+        raise RuntimeError(
+            f"没有本地语音识别模型：{local / 'model.bin'}。"
+            f"请主人用 node agent-bridge/scripts/fetch-whisper.mjs {model_size} 下一个，"
+            "或者设 WHISPER_MODEL_DIR 指到放模型的目录"
+        )
+    return local
+
+
 def transcribe(wav_path: Path, model_size: str = "small") -> dict:
+    local = whisper_model_dir(model_size)
     from faster_whisper import WhisperModel
 
     print(f"[live] loading whisper {model_size} (cpu/int8)...", flush=True)
-    local = TOOLS / "whisper-models" / model_size
-    model_ref = str(local) if (local / "model.bin").exists() else model_size
-    model = WhisperModel(model_ref, device="cpu", compute_type="int8")
+    model = WhisperModel(str(local), device="cpu", compute_type="int8", local_files_only=True)
     segments, info = model.transcribe(
         str(wav_path), language="zh", vad_filter=True, beam_size=5
     )
@@ -105,15 +162,57 @@ def transcribe(wav_path: Path, model_size: str = "small") -> dict:
     return {"text": text, "language": info.language, "duration": info.duration}
 
 
-def open_live(url: str) -> None:
-    if os.path.exists(EDGE):
-        subprocess.Popen(
-            [EDGE, "--new-window", "--start-maximized", url],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-    else:
+def open_live(url: str) -> dict:
+    """单独开一个 Edge：用临时的 --user-data-dir，这样它是自己的一个进程，
+    不会并进主人已经开着的 Edge 里，看完能只关这一个。返回 {proc, profile, note}。"""
+    edge = find_edge()
+    if not edge:
+        # 没有 Edge 只能交给默认浏览器，这种开的窗口没法自动关
         os.startfile(url)  # noqa: S606
+        return {"proc": None, "profile": None, "note": "没找到 Edge，用默认浏览器开的，看完关不掉，跟主人说一声"}
+    profile = tempfile.mkdtemp(prefix="live-edge-")
+    proc = subprocess.Popen(
+        [
+            edge,
+            f"--user-data-dir={profile}",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--autoplay-policy=no-user-gesture-required",
+            "--new-window",
+            "--start-maximized",
+            url,
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    return {"proc": proc, "profile": profile, "note": ""}
+
+
+def close_live(opened: dict) -> None:
+    """只关自己开的那个 Edge（连同它的子进程），再删掉临时配置。"""
+    proc = opened.get("proc")
+    if proc is not None and proc.poll() is None:
+        try:
+            subprocess.run(
+                ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=15,
+            )
+        except Exception:  # noqa: BLE001
+            try:
+                proc.kill()
+            except Exception:  # noqa: BLE001
+                pass
+        print("[live] 关掉了自己开的 Edge 窗口", flush=True)
+    profile = opened.get("profile")
+    if profile:
+        # 进程刚退，文件可能还占着一会儿
+        for _ in range(5):
+            shutil.rmtree(profile, ignore_errors=True)
+            if not os.path.exists(profile):
+                break
+            time.sleep(1)
 
 
 def capture(args: argparse.Namespace, out_dir: Path | None = None) -> dict:
@@ -168,9 +267,15 @@ def capture(args: argparse.Namespace, out_dir: Path | None = None) -> dict:
 
 def watch(args: argparse.Namespace) -> dict:
     print(f"[live] opening {args.url}", flush=True)
-    open_live(args.url)
-    time.sleep(max(0, args.load_wait))
-    return capture(args)
+    opened = open_live(args.url)
+    try:
+        time.sleep(max(0, args.load_wait))
+        result = capture(args)
+    finally:
+        close_live(opened)
+    if opened["note"]:
+        result["errors"].append(opened["note"])
+    return result
 
 
 def main() -> None:
@@ -202,13 +307,20 @@ def main() -> None:
     p_watch.add_argument("--model", default="base")
 
     args = ap.parse_args()
+    if hasattr(args, "seconds"):
+        args.seconds = clamp_seconds(args.seconds)
     if args.cmd == "shot":
         print(json.dumps({"file": str(shot(Path(args.out)))}, ensure_ascii=False))
     elif args.cmd == "rec":
         p = record(Path(args.out), args.seconds, args.device)
         print(json.dumps({"file": str(p)}, ensure_ascii=False))
     elif args.cmd == "asr":
-        print(json.dumps(transcribe(Path(args.wav), args.model), ensure_ascii=False))
+        try:
+            print(json.dumps(transcribe(Path(args.wav), args.model), ensure_ascii=False))
+        except Exception as exc:  # noqa: BLE001
+            # 最后一行还是 JSON，调用方能拿到原因
+            print(json.dumps({"text": "", "error": str(exc)}, ensure_ascii=False))
+            sys.exit(1)
     elif args.cmd == "capture":
         print(json.dumps(capture(args), ensure_ascii=False))
     elif args.cmd == "watch":

@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 // 学新歌：下载 B站 音轨（或用本地音频）→ 转 wav → sing/render.py 换成自己的嗓子 → data/songs/<歌名>/。
-// 一段 30 秒要 4~5 分钟，比一轮聊天长得多，所以在后台跑：
-//   start 交代完就退出，干活的进程是它的“孙子”，父进程一退就跟 DSH 的进程树脱开，
-//   一轮结束时 DSH 的 taskkill /T 收不到它（之前就是这样每次死在“换嗓子”那步）。
+// 一段 30 秒要 4~5 分钟，比一轮聊天长得多，所以在后台跑。
+// 干活的进程不能是 DSH 启动的：DSH 会记下这一轮里出现过的所有子孙进程（pid + 创建时间），
+// 一轮结束全杀，父进程先退也躲不掉（之前就是这样每次死在“换嗓子”那步）。所以：
+//   start 只把任务记成“排队”，bridge 每 3 秒看一眼（watchLearnJobs），由它来起后台进程；
+//   10 秒没人接（bridge 没开、在普通终端里跑），start 就自己起。
 //
 // node agent-bridge/sing/learn.mjs start --title 歌名 --artist 歌手 --bv BV号 --seg 104-134 [--seg 起-止 …] [--lyrics 歌词.json] [--shift 0]
 // node agent-bridge/sing/learn.mjs start --title 歌名 --audio 本地音频 --seg 起-止
@@ -36,8 +38,8 @@ const alive = (pid) => {
   try {
     process.kill(pid, 0);
     return true;
-  } catch {
-    return false;
+  } catch (err) {
+    return err.code === 'EPERM'; // bridge 用管理员起的，普通权限探不了，但它在
   }
 };
 const ago = (t) => {
@@ -69,6 +71,10 @@ function jobs() {
 
 // 状态文件里写着 running，但进程已经没了（关机、被杀）：当失败处理
 function settle(job) {
+  if (job.state === 'queued' && Date.now() - job.startedAt > 120_000) {
+    job.state = 'failed';
+    job.error = '排了两分钟没人接手，重新 start 一次';
+  }
   if (job.state === 'running' && !alive(job.pid)) {
     job.state = 'failed';
     job.error = job.error || '后台进程没了（可能关机或被杀了），重新 start 一次';
@@ -76,7 +82,46 @@ function settle(job) {
   return job;
 }
 
-function start(argv) {
+// 谁先建出 <id>.claim 谁来跑，bridge 和 start 的兜底不会把同一首学两遍
+function claim(id) {
+  try {
+    fs.closeSync(fs.openSync(path.join(JOBS, `${id}.claim`), 'wx'));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function launch(id) {
+  const child = spawn(process.execPath, [fileURLToPath(import.meta.url), '_run', id], {
+    cwd: ROOT,
+    detached: true,
+    stdio: 'ignore',
+    windowsHide: true,
+  });
+  child.unref();
+  return child.pid;
+}
+
+/** bridge 里调：每 3 秒看一眼有没有排队的学歌任务，有就由 bridge 起后台进程（不在 DSH 的进程树里）。 */
+export function watchLearnJobs(log = () => {}) {
+  const tick = () => {
+    for (const job of jobs()) {
+      if (job.state !== 'queued' || !claim(job.id)) continue;
+      const pid = launch(job.id);
+      log(`学歌：开始学《${job.title}》（${job.seg.join(' ')}，后台进程 ${pid}）`);
+    }
+  };
+  return setInterval(() => {
+    try {
+      tick();
+    } catch (err) {
+      log(`学歌：看任务出错 ${err.message}`);
+    }
+  }, 3000);
+}
+
+async function start(argv) {
   const a = parseArgs(argv);
   if (!a.title || !(a.bv || a.audio) || !a.seg.length) {
     console.log('用法：learn.mjs start --title 歌名 [--artist 歌手] (--bv BV号 | --audio 音频文件) --seg 起-止 [--seg …] [--lyrics 歌词.json]');
@@ -89,7 +134,7 @@ function start(argv) {
       process.exit(2);
     }
   }
-  const busy = jobs().map(settle).find((j) => j.state === 'running');
+  const busy = jobs().map(settle).find((j) => j.state === 'running' || j.state === 'queued');
   if (busy) {
     console.log(`显卡正在学《${busy.title}》（${busy.step}，${ago(busy.startedAt)}开始），等它学完再学下一首。`);
     process.exit(1);
@@ -105,22 +150,17 @@ function start(argv) {
     seg: a.seg,
     lyrics: a.lyrics ? path.resolve(a.lyrics) : null,
     shift: a.shift || '0',
-    state: 'running',
+    state: 'queued',
     step: '排队',
     startedAt: Date.now(),
     updatedAt: Date.now(),
     log: path.join(JOBS, `${id}.log`),
   };
-  writeJson(path.join(JOBS, `${id}.json`), job);
-  const child = spawn(process.execPath, [fileURLToPath(import.meta.url), '_run', id], {
-    cwd: ROOT,
-    detached: true,
-    stdio: 'ignore',
-    windowsHide: true,
-  });
-  child.unref();
-  job.pid = child.pid;
-  writeJson(path.join(JOBS, `${id}.json`), job);
+  const file = path.join(JOBS, `${id}.json`);
+  writeJson(file, job);
+  // 等 bridge 接手（它每 3 秒看一次）
+  for (let i = 0; i < 20 && readJson(file)?.state === 'queued'; i++) await new Promise((r) => setTimeout(r, 500));
+  if (readJson(file)?.state === 'queued' && claim(id)) launch(id);
   const mins = a.seg.length * MIN_PER_SEG + (job.bv ? 1 : 0);
   console.log(`开始学《${a.title}》了，${a.seg.length} 段，大概 ${mins} 分钟，在后台跑，这轮聊完也不会断。`);
   console.log(`进度：node agent-bridge/sing/learn.mjs status ${a.title}`);
@@ -153,6 +193,9 @@ async function run(id) {
   const file = path.join(JOBS, `${id}.json`);
   const job = readJson(file);
   job.pid = process.pid;
+  job.state = 'running';
+  job.updatedAt = Date.now();
+  writeJson(file, job);
   const say = (line) => fs.appendFileSync(job.log, `[${new Date().toLocaleTimeString('zh-CN', { hour12: false })}] ${line}\n`);
   const step = (s) => {
     job.step = s;
@@ -284,8 +327,11 @@ async function downloadAudio(bvid, out, say) {
   fs.writeFileSync(out, Buffer.from(await r.arrayBuffer()));
 }
 
-const [cmd, ...rest] = process.argv.slice(2);
-if (cmd === 'start') start(rest);
-else if (cmd === 'status') status(rest);
-else if (cmd === '_run') await run(rest[0]);
-else console.log('用法：learn.mjs start … | status [歌名]（见文件开头）');
+// 被 bridge import 时只导出 watchLearnJobs，不跑命令行
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  const [cmd, ...rest] = process.argv.slice(2);
+  if (cmd === 'start') await start(rest);
+  else if (cmd === 'status') status(rest);
+  else if (cmd === '_run') await run(rest[0]);
+  else console.log('用法：learn.mjs start … | status [歌名]（见文件开头）');
+}

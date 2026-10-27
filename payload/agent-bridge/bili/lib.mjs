@@ -81,3 +81,41 @@ export function parseSidx(buf, indexStart) {
   }
   return refs;
 }
+
+// ── 视频号：BV 号、av 号、b23.tv 短链 ────────────────────────────────────
+const SHORT_RE = /(?:https?:\/\/)?(?:b23\.tv|bili2233\.cn)\/[0-9A-Za-z]+/i;
+
+/** 从一段文字（BV 号、链接、分享文案）里认出视频：{ bvid } / { aid } / { short: 短链 } / null。 */
+export function parseVideoRef(text) {
+  const s = String(text || '');
+  const bv = s.match(/BV[0-9A-Za-z]{10}/);
+  if (bv) return { bvid: bv[0] };
+  const short = s.match(SHORT_RE);
+  if (short) return { short: /^https?:/i.test(short[0]) ? short[0] : `https://${short[0]}` };
+  const av = s.match(/(?:^|[^0-9A-Za-z])av(\d{1,12})(?![0-9])/i) || s.match(/[?&]aid=(\d{1,12})/);
+  if (av) return { aid: av[1] };
+  return null;
+}
+
+/**
+ * 认出视频；是 b23.tv 短链就自己跟跳转（不自动跳，只读 Location，最多 3 次）拿到 BV / av 号。
+ * fetchImpl 可以换成假的，方便离线测试。认不出返回 null。
+ */
+export async function resolveVideoRef(text, fetchImpl = fetch) {
+  let ref = parseVideoRef(text);
+  for (let hop = 0; ref?.short && hop < 3; hop++) {
+    const r = await fetchImpl(ref.short, {
+      method: 'GET',
+      redirect: 'manual',
+      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36' },
+      signal: AbortSignal.timeout(15_000),
+    });
+    const loc = r.headers?.get?.('location') || '';
+    if (!loc) return null;
+    const next = parseVideoRef(loc);
+    // 跳到的地方还是短链才接着跟；跳到别处（不是视频）就算认不出
+    if (!next) return null;
+    ref = next;
+  }
+  return ref?.short ? null : ref;
+}

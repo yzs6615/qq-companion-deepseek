@@ -9,6 +9,8 @@
 
 watch 会定时截手机屏幕，同时用电脑麦克风录手机外放，最后转成文字，
 全部放进 data/live/phone-<时间戳>/，并打印一行 JSON。
+一次最多看 90 秒，--seconds 写多了会截到 90。
+语音识别只用本地模型：tools/whisper-models/<大小>/model.bin（或 WHISPER_MODEL_DIR），没有就报错，不去网上下。
 """
 from __future__ import annotations
 
@@ -38,6 +40,14 @@ except Exception:
 
 ADB = TOOLS / "platform-tools" / "adb.exe"
 LIVE_DIR = ROOT / "data" / "live"
+MAX_SECONDS = 90  # 一次最多看/录这么久，再长这一轮聊天就等太久了
+
+
+def clamp_seconds(seconds: float) -> float:
+    if seconds > MAX_SECONDS:
+        print(f"[phone] 一次最多 {MAX_SECONDS} 秒，--seconds {seconds:g} 截到 {MAX_SECONDS}", flush=True)
+        return float(MAX_SECONDS)
+    return seconds
 
 
 def now_tag() -> str:
@@ -106,13 +116,32 @@ def record(path: Path, seconds: float) -> Path:
     return path
 
 
+def whisper_model_dir(model_size: str) -> Path:
+    """只用本地模型，找不到就报错，绝不自己去网上下。
+    模型目录：设了 WHISPER_MODEL_DIR 就用它（下面放 <大小>/model.bin，或者直接就是放 model.bin 的目录），
+    没设用 tools/whisper-models。"""
+    if os.environ.get("WHISPER_MODEL_DIR"):
+        base = Path(os.environ["WHISPER_MODEL_DIR"])
+        if (base / "model.bin").exists():
+            return base
+    else:
+        base = TOOLS / "whisper-models"
+    local = base / model_size
+    if not (local / "model.bin").exists():
+        raise RuntimeError(
+            f"没有本地语音识别模型：{local / 'model.bin'}。"
+            f"请主人用 node agent-bridge/scripts/fetch-whisper.mjs {model_size} 下一个，"
+            "或者设 WHISPER_MODEL_DIR 指到放模型的目录"
+        )
+    return local
+
+
 def transcribe(wav_path: Path, model_size: str = "base") -> dict:
+    local = whisper_model_dir(model_size)
     from faster_whisper import WhisperModel
 
     print(f"[phone] loading whisper {model_size} (cpu/int8)...", flush=True)
-    local = TOOLS / "whisper-models" / model_size
-    model_ref = str(local) if (local / "model.bin").exists() else model_size
-    model = WhisperModel(model_ref, device="cpu", compute_type="int8")
+    model = WhisperModel(str(local), device="cpu", compute_type="int8", local_files_only=True)
     segments, info = model.transcribe(
         str(wav_path), language="zh", vad_filter=True, beam_size=5
     )
@@ -206,6 +235,8 @@ def main() -> None:
     p_watch.add_argument("--serial", default=None)
 
     args = ap.parse_args()
+    if hasattr(args, "seconds"):
+        args.seconds = clamp_seconds(args.seconds)
     if args.cmd in ("shot", "watch"):
         # 告诉 bridge 的黑屏看门狗：这会儿真在用手机
         try:
@@ -221,7 +252,12 @@ def main() -> None:
         p = record(Path(args.out), args.seconds)
         print(json.dumps({"file": str(p)}, ensure_ascii=False))
     elif args.cmd == "asr":
-        print(json.dumps(transcribe(Path(args.wav), args.model), ensure_ascii=False))
+        try:
+            print(json.dumps(transcribe(Path(args.wav), args.model), ensure_ascii=False))
+        except Exception as exc:  # noqa: BLE001
+            # 最后一行还是 JSON，bridge / bili.mjs 能拿到原因
+            print(json.dumps({"text": "", "error": str(exc)}, ensure_ascii=False))
+            sys.exit(1)
     elif args.cmd == "watch":
         print(json.dumps(watch(args), ensure_ascii=False))
 

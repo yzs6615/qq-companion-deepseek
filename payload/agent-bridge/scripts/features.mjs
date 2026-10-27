@@ -6,6 +6,7 @@
  *   node scripts/features.mjs            # 生成 data/features.html 并用浏览器打开
  *   node scripts/features.mjs --no-open  # 只生成（启动器用这个，再用 explorer 打开，免得浏览器跟着变成管理员权限）
  *   node scripts/features.mjs --out <文件>
+ *   node scripts/features.mjs --text     # 只在终端打印功能开关和设置（不生成网页、不带每个人的记忆；机器人自己查开了啥用这个）
  *
  * 只读本机文件，不联网。页面里不放 API Key、OneBot token、手机 PIN 这类密钥。
  */
@@ -94,7 +95,7 @@ const LIFE_TAKEN = {
   '主动戳你': ['开着 ChronoLife：不戳。', true],
   '等你回': ['开着 ChronoLife：不追问。', true],
   '被冷落有情绪': ['开着 ChronoLife：你没回不算冷落，不闹情绪。', true],
-  '每周一封信': ['开着 ChronoLife：不自动写；发 /信 照样马上写一封。', true],
+  '每周一封信': ['开着 ChronoLife：不自动写；说“给我写封信”（或发 /信）照样马上写一封。', true],
   '插嘴': ['开着 ChronoLife：群里没被叫就不插嘴。', true],
   '电脑室友': ['开着 ChronoLife：聊天时照样知道电脑上的事，只是不因为这些主动开口。', false],
   '纪念日和天气': ['开着 ChronoLife：上午不单独发；聊天时照样知道、会提。', false],
@@ -119,7 +120,7 @@ const features = [
     ['表情包按意思挑', 'on', (() => { const idx = readJson(path.join(env.STICKER_DIR ? path.resolve(env.STICKER_DIR) : path.join(DATA_DIR, 'stickers'), 'index.json'), {}); return `${Object.keys(idx).length} 张有描述`; })(), '每张表情图配了一句“画面：用法”的描述（node scripts\\sticker-index.mjs 让模型看图写），她想表达“无语翻白眼”“笑到打滚”就挑最贴的那张；对不上就不硬发。新收的表情包会自己补描述。'],
     ['偷表情包', on(cfg.stealStickers), `每种情绪最多留 ${cfg.stealMax} 张收来的 · 发表情时一半机会用收来的`, '对方发的表情包（只认 QQ 标成表情的图，普通照片不收），它觉得好玩就按情绪收进自己的表情库，以后自己也用。'],
     ['学说话', on(cfg.learnStyle && cfg.facts), '和长期事实一起提炼，不多花模型调用', '从聊天里学对方的口头禅、语气词、爱用的梗，偶尔学着用（越熟越容易被带跑偏）。'],
-    ['学某个人说话', on(cfg.mimic), (() => { const m = readJson(path.join(DATA_DIR, 'mimic.json'), {}).active; if (!m) return '没在学谁：把一段聊天合并转发给它，回序号选人'; const k = Math.max(0.15, Math.min(1, cfg.mimicRampDays > 0 ? (Date.now() - m.startedAt) / 86400_000 / cfg.mimicRampDays : 1)); return `在学「${m.name}」· 大概 ${Math.round(k * 10)} 成（${cfg.mimicRampDays} 天学到位）· 习惯：${(m.traits || []).join('；')}`; })(), '合并转发聊天记录给它 → 选一个人 → 总结 TA 的说话习惯，按天数慢慢带进自己的语气；不冒充那个人、不搬原话里的私事。/学说话 看进度，/别学了 停掉并删掉素材。'],
+    ['学某个人说话', on(cfg.mimic), (() => { const m = readJson(path.join(DATA_DIR, 'mimic.json'), {}).active; if (!m) return '没在学谁：把一段聊天合并转发给它，回序号选人'; const k = Math.max(0.15, Math.min(1, cfg.mimicRampDays > 0 ? (Date.now() - m.startedAt) / 86400_000 / cfg.mimicRampDays : 1)); return `在学「${m.name}」· 大概 ${Math.round(k * 10)} 成（${cfg.mimicRampDays} 天学到位）· 习惯：${(m.traits || []).join('；')}`; })(), '合并转发聊天记录给它 → 选一个人 → 总结 TA 的说话习惯，按天数慢慢带进自己的语气；不冒充那个人、不搬原话里的私事。问她在学谁就知道进度，说“别学了”停掉并删掉素材。'],
     ['发语音', on(cfg.voice), cfg.voice ? `百炼 CosyVoice 复刻音色 · ${cfg.voiceModel} · ${cfg.voiceMaxChars} 字以内才念 · 一天最多 ${cfg.voiceMaxDay} 条${cfg.voiceCutMs ? ` · 句尾再剪 ${cfg.voiceCutMs}ms` : ''}` : '没开：.env 里要有 VOICE_ID 和 DASHSCOPE_API_KEY', '它觉得这句适合说出来（笑、吐槽、撒娇、晚安，或者你让它发语音）就用自己的声音发 QQ 语音；合成后自动去掉开头结尾的杂音。太长、发够了、合成失败都改成打字。语音能带语气：生气、难过、委屈、害怕、惊讶、嫌弃、困，她可以写 [语音:害怕] 自己点；没点就跟着有来由的心情走（你惹她生气、委屈、烦你，或者熬夜后犯困），没来由的心情不算；带语气的音量压一压，不会突然很大声。开心的语气试过跟生气听不出区别，没做。/说话 xxx 直接念给你听（不带心情）。'],
     ['唱歌', on(cfg.sing), (() => { const dir = env.SONG_DIR ? path.resolve(env.SONG_DIR) : path.join(DATA_DIR, 'songs'); let songs = []; try { songs = fs.readdirSync(dir, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => readJson(path.join(dir, d.name, 'song.json'), null)).filter((m) => m && (m.clips || []).length); } catch {} return songs.length ? `会唱 ${songs.map((m) => `${m.title}（${m.clips.length} 段）`).join('、')} · 一天最多主动唱 ${cfg.singMaxDay} 段` : '还没有歌：用 sing/render.py 转一首'; })(), '用她自己的嗓子唱：提前把歌转好放进歌库（Seed-VC 唱歌模型用她的声音微调过，参考用她唱歌的片段），聊天时它想唱、或者你让它唱，就挑一段发 QQ 语音，不连着唱同一段。没学过的歌说还没学会；唱够了说嗓子累了。/唱歌 歌名 直接听，/歌单 看会哪些。'],
   ]],
@@ -128,8 +129,8 @@ const features = [
     ['熟悉度', 'on', `门槛：刚认识 <5 · 一般熟 <25 · 熟 <80 · 很熟${env.CLOSENESS_SET ? ` · 手动调分：${env.CLOSENESS_SET}` : ''}`, '亲密度 + 聊过天数×2 + 轮数×0.1 + 手动调整；越熟越敢损、越随便。'],
     ['记得你的作息', on(cfg.rhythm), (() => { const qs = Object.entries(state).filter(([k, v]) => /^\d+$/.test(k) && v?.rhythm); return qs.length ? qs.map(([k, v]) => `${k}：平时 ${clockOfMin(v.rhythm.wake)} 冒头、${clockOfMin(v.rhythm.sleep)} 没动静（${v.rhythm.days} 天）`).join('；') : '聊满 4 天才看得出'; })(), '从聊天时间摸清你平时几点冒头、几点没动静；今天比平时晚睡、早起，她会注意到，顺口说一句（一天只说一次）。'],
     ['对你好奇', on(cfg.curious), `每轮 ${Math.round(cfg.curiousProb * 100)}% 提醒她一次，一天最多一次`, '记住的事里还没提到的方面（是干嘛的、住哪、喜欢干嘛、爱吃啥、养没养猫狗、生日），她会找机会自然地问一句，同一个方面一周内不重复。'],
-    ['纪念日和天气', on(cfg.anniversary || cfg.weather), cfg.weatherCity ? `默认城市：${cfg.weatherCity}` : '在 QQ 里发 /城市 杭州 告诉她你在哪', '认识第 100 天、周年、你的生日（/生日 5-20）那天她心里知道，上午会主动说一句；你那边下雨、降温、很热很冷时会顺口提醒（天气来自 Open-Meteo，免费）。认识的日子可以在 .env 写 MEET_DATE=QQ号:2025-05-15。'],
-    ['日记', on(cfg.journal), (() => { let days = []; try { days = fs.readdirSync(path.join(DATA_DIR, 'journal')).filter((f) => /^\d{4}-\d{2}-\d{2}\.json$/.test(f)).sort(); } catch {} return days.length ? `写了 ${days.length} 篇，最近一篇 ${days.at(-1).slice(0, 10)} · 每天 ${cfg.journalHour} 点后写 · 聊天带最近 ${cfg.journalDays} 天` : `还没写过 · 每天 ${cfg.journalHour} 点后写`; })(), '白天每轮聊天记一行流水（一直留着），睡前用自己的口吻写当天的日记：今天干了啥、什么心情，再给每个聊过的人记一行聊了啥。聊天时带上最近几天的日记，但只带跟这个人的那行，跟 A 聊的不会出现在跟 B 的对话里；更早的只留跟这个人有关的，当长期记忆。/日记 看最新一篇；启动器右上角“日记”打开日记网页，能选日期翻、能搜。'],
+    ['纪念日和天气', on(cfg.anniversary || cfg.weather), cfg.weatherCity ? `默认城市：${cfg.weatherCity}` : '跟她说“我在杭州”告诉她你在哪', '认识第 100 天、周年、你的生日（跟她说一声就记下）那天她心里知道，上午会主动说一句；你那边下雨、降温、很热很冷时会顺口提醒（天气来自 Open-Meteo，免费）。认识的日子可以在 .env 写 MEET_DATE=QQ号:2025-05-15。'],
+    ['日记', on(cfg.journal), (() => { let days = []; try { days = fs.readdirSync(path.join(DATA_DIR, 'journal')).filter((f) => /^\d{4}-\d{2}-\d{2}\.json$/.test(f)).sort(); } catch {} return days.length ? `写了 ${days.length} 篇，最近一篇 ${days.at(-1).slice(0, 10)} · 每天 ${cfg.journalHour} 点后写 · 聊天带最近 ${cfg.journalDays} 天` : `还没写过 · 每天 ${cfg.journalHour} 点后写`; })(), '白天每轮聊天记一行流水（一直留着），睡前用自己的口吻写当天的日记：今天干了啥、什么心情，再给每个聊过的人记一行聊了啥。聊天时带上最近几天的日记，但只带跟这个人的那行，跟 A 聊的不会出现在跟 B 的对话里；更早的只留跟这个人有关的，当长期记忆。说“给我看看你的日记”看最新一篇；启动器右上角“日记”打开日记网页，能选日期翻、能搜。'],
   ]],
   ['心情和作息', [
     ['心情和精力', 'on', '按日期和时段定，同一时段不变', '午后犯困、深夜低电量；影响语气，被问“在干嘛”时要对得上今天干过的事。'],
@@ -144,12 +145,12 @@ const features = [
     ['做梦', on(cfg.dream), `每天 ${Math.round(cfg.dreamProb * 100)}% 会梦见`, '早上醒来有时记得昨晚的梦：拿最近刷到的、跟你聊过的事打乱了拼的，荒诞又有你。今天第一次聊天、或者发早安时，她可能顺口说一句“我昨晚梦见……”，只说一次。'],
     ['人设成长', on(cfg.reflect), `每天 ${cfg.reflectHour} 点后回想一次（攒够 8 件事会提前）· 最多 ${cfg.selfMax} 条 · ${cfg.selfForgetDays} 天没再印证就淡忘（“最近在看” ${cfg.recentForgetDays} 天）`, '把自己找事做的日记反思成它自己的喜好、观点、最近在看的、学到的梗；又印证一次就加深。persona.md 的核心人设不动，这只是“最近的自己”。'],
     ['深夜电台', on(cfg.radio), (() => { let n = 0; let last = ''; try { for (const d of fs.readdirSync(path.join(DATA_DIR, 'radio'), { withFileTypes: true })) { if (!d.isDirectory()) continue; for (const e of readJson(path.join(DATA_DIR, 'radio', d.name, 'episodes.json'), [])) { n++; if (e.createdAt > last) last = e.createdAt; } } } catch {} return n ? `录了 ${n} 期，最近一期 ${last.slice(5, 10)} · 一天最多 ${cfg.radioMaxDay} 期` : `还没录过 · 一天最多 ${cfg.radioMaxDay} 期`; })(), '说“开台，今晚想听点适合下雨的”“来一期开心的，别聊大道理”“今晚只听一分钟”，她就录一期两三分钟（或一分钟）的语音节目：用她自己的口气，讲她最近真刷到的事，配一张节目卡，推荐一首网易云上真搜得到的歌（歌名歌手对不上就不给链接）。“我来投稿，你帮我念”她帮你念，“上期那个话题接着讲”她接着聊，“再放一遍”不再花钱。私聊节目能用上她记得的你的事，群节目不带私事。录的时候来找她，她知道自己在录；录完聊天里也记得录过。'],
-    ['旅行明信片', on(cfg.postcard), cfg.postcard ? (() => { const t = state._trips?.cur; return t ? `这趟：${t.city}（${t.spot}）${t.sent ? '，已寄出' : ''}` : `每 ${cfg.postcardEveryWeeks} 周出去一趟`; })() : '', `隔几周的周末，她在自己的小世界里出去玩一趟（周五定去哪：厦门、青岛、大理、哈尔滨…按季节挑），周日下午给你寄一张明信片：正面用百炼画当地风景（一张一两毛钱），背面手写几句、贴邮票、盖邮戳。开着 ChronoLife 时不主动发，等你下次来聊天时她提一句再给。发 /明信片 可以马上寄一张。`],
+    ['旅行明信片', on(cfg.postcard), cfg.postcard ? (() => { const t = state._trips?.cur; return t ? `这趟：${t.city}（${t.spot}）${t.sent ? '，已寄出' : ''}` : `每 ${cfg.postcardEveryWeeks} 周出去一趟`; })() : '', `隔几周的周末，她在自己的小世界里出去玩一趟（周五定去哪：厦门、青岛、大理、哈尔滨…按季节挑），周日下午给你寄一张明信片：正面用百炼画当地风景（一张一两毛钱），背面手写几句、贴邮票、盖邮戳。开着 ChronoLife 时不主动发，等你下次来聊天时她提一句再给。跟她说“寄张明信片”可以马上寄一张。`],
     ['现场照', on(cfg.photo), (() => { const n = (d) => { try { return fs.readdirSync(path.join(SCENE_DIR, d)).length; } catch { return 0; } }; return `${n('bg')} 个房间背景、${n('pose')} 个动作 · 一天最多 ${cfg.photoMaxDay} 张`; })(), `问她“在干嘛”，她可能回一张“现在的她”：按几点、你那边的天气挑她房间的样子（早上、白天、傍晚、夜里开着台灯、下雨、下雪），按她在干嘛和心情挑动作（睡觉、刷手机、听歌、吃饭、生闷气、犯困…）。图在 ${SCENE_DIR} 里（bg 房间、pose 动作）。`],
     ['送她的东西摆进房间', on(cfg.photo), (() => { const g = readJson(path.join(SCENE_DIR, 'gifts', 'gifts.json'), []); return g.length ? `房间里：${g.slice(-3).map((x) => x.name).join('、')}` : '还没收到过'; })(), '跟着现场照一起开。你发张图或者说“送你个…”，她想收就收下：用百炼把这个东西画出来（白底，抠成透明的），摆进她的房间，马上拍一张“摆好了”给你看；以后的现场照里也能看到最近收的 3 件。她只记得你送过她什么，别人送的不会跟你提。一天最多画 3 件。'],
   ]],
   ['主动找你', [
-    ['ChronoLife 主动分享', cfg.chronolife && life?.settings?.proactive ? 'on' : 'off', life?.settings ? `这周发了 ${life.week}/${life.settings.weeklyMax} 条 · ${life.settings.quietStart}~${life.settings.quietEnd} 点不发 · 同一个人隔 ${life.settings.cooldownHours} 小时` : '', '开着 ChronoLife 时，主动找你只走这一条：小屋里刚有了具体内容的事（写了句什么、植物换了阶段、旅行回来），或者自己找事做时刷到你会喜欢的，她用自己的口气随口说一句，不想说就不说。只发 PROACTIVE_QQ 里的人、不发群；上一条你没回就不发下一条；你 20 分钟内刚聊过就留到聊天里说。主人私聊 /生活 主动 开 / 关。'],
+    ['ChronoLife 主动分享', cfg.chronolife && life?.settings?.proactive ? 'on' : 'off', life?.settings ? `这周发了 ${life.week}/${life.settings.weeklyMax} 条 · ${life.settings.quietStart}~${life.settings.quietEnd} 点不发 · 同一个人隔 ${life.settings.cooldownHours} 小时` : '', '开着 ChronoLife 时，主动找你只走这一条：小屋里刚有了具体内容的事（写了句什么、植物换了阶段、旅行回来），或者自己找事做时刷到你会喜欢的，她用自己的口气随口说一句，不想说就不说。只发 PROACTIVE_QQ 里的人、不发群；上一条你没回就不发下一条；你 20 分钟内刚聊过就留到聊天里说。主人私聊说“别主动找我”“可以主动找我了”就改（/生活 主动 开 / 关 也行）。'],
     ['早安 / 晚安 / 冒泡', on(cfg.proactive && cfg.greetings), `每天最多 ${cfg.proactiveMax} 条 · ${cfg.proactiveIdleHours} 小时没动静可能冒个泡`, '早上、晚上掷骰子决定今天说不说；内容由模型现写。'],
     ['回访', on(cfg.followup && cfg.facts && cfg.proactive), `${cfg.followupHours.join('–')} 点 · 只找 ${cfg.proactiveQQ.join(', ') || '（没配 PROACTIVE_QQ）'} · 隔 2 小时以上`, '对方提到将来的事（考试、面试…），事后到点顺口问一句；超过 36 小时就不问了。'],
     ['主动戳你', on(cfg.pokeSelf), '一天最多一次', `白天你 ${cfg.pokeSelfIdleMin} 分钟以上没动静、她没在睡觉的时候，偶尔在 QQ 里戳你一下，什么都不说；无聊、嘴贫的时候更想戳。戳完会记进日记，你问“戳我干嘛”她对得上。`],
@@ -158,7 +159,7 @@ const features = [
   ]],
   ['电脑上的她', [
     ['电脑室友', on(cfg.pcBuddy), cfg.pcBuddy ? `只跟 ${cfg.pcOwner || cfg.proactiveQQ[0] || '（没设）'} 提 · 一天最多主动说 ${cfg.pcMaxDay} 句` : '', '她“住在这台电脑里”：看得见电脑上在放什么歌（网易云、QQ音乐、酷狗、Spotify…）、开着什么游戏、电脑开了多久、深夜人还在不在电脑前。聊天时心里知道；一首歌这周放到第 3 遍、凌晨还在打游戏、电脑连开好几天，会像室友一样顺口说一句。只看这几样，别的窗口一概不看；只在私聊里跟电脑的主人提。'],
-    ['电脑喇叭说话', on(cfg.speaker), cfg.speaker ? `一天最多 ${cfg.speakerMaxDay} 句 · ${cfg.quietHours.join('~')} 点不出声` : '', '早上你第一次坐到电脑前、或者离开两个小时以上又回来，她用自己的声音从电脑喇叭说一句（“早”“回来啦 去哪了”）。要开电脑室友和语音；睡觉时段、夜里、ChronoLife 休息时都不出声，两句至少隔一小时。'],
+    ['电脑喇叭说话', on(cfg.speaker), cfg.speaker ? `一天最多 ${cfg.speakerMaxDay} 句 · ${cfg.quietHours.join('~')} 点不出声` : '', '早上你第一次坐到电脑前、或者离开两个小时以上又回来，她用自己的声音从电脑喇叭说一句（“早”“回来啦 去哪了”）。你私聊让她“用喇叭说句话”她也会说（只听主人的，一天最多 ' + cfg.speakerAskMaxDay + ' 句），都是她自己的声音，不用系统语音。要开电脑室友和语音；睡觉时段、夜里、ChronoLife 休息时都不出声，自己打招呼的两句至少隔一小时。'],
     ['电脑上留便条', on(cfg.notes), cfg.notes ? `离开 ${cfg.noteAfterMin} 分钟以上 · 一天最多一张` : '', '你离开电脑好几个小时，她偶尔在桌面上留一张“<名字>的便条.txt”，像室友贴门上的纸条（1~3 句，不写私事和聊天内容）；你回来时右下角弹个通知“<名字>给你留了张便条”。夜里不留。'],
     ['桌面抽屉', on(cfg.drawer), cfg.drawer ? '桌面上“<名字>的抽屉”' : '', '桌面上一个“<名字>的抽屉”文件夹：她写给你的信、寄的明信片、发给你的现场照、梦见你的梦（梦.txt）、留过的便条（便条.txt）、自己找事做时收藏的视频（收藏.txt），都放一份。只放跟电脑的主人有关的。'],
     ['用 QQ 音乐放歌', on(cfg.playMusic), cfg.playMusic ? (fs.existsSync(cfg.qqMusicExe) ? `QQ 音乐：${cfg.qqMusicExe}` : '没找到 QQ 音乐，只发链接') + ` · 一天最多 ${cfg.playMusicMaxDay} 首` : '', '让她放首歌、或者她夜里想给你放首睡前听的：先在 QQ 音乐搜到这首（挑原版，不挑 Live / 伴奏），你在电脑前（键盘鼠标 5 分钟内动过）就直接在电脑上的 QQ 音乐里放；你不在电脑前就发 QQ 音乐的链接。只在私聊里。'],
@@ -167,7 +168,7 @@ const features = [
     ['在线状态和个签', on(cfg.onlineStatus || cfg.longnick), (() => { const p = state._presence || {}; return [p.name ? `现在：${p.name}` : '', p.sign ? `个签：${p.sign}` : ''].filter(Boolean).join(' · ') || '还没改过'; })(), 'QQ 在线状态跟着她过日子变：半夜睡觉中、熬夜中、自己找事做时摸鱼中、唱完歌听歌中，平时跟心情（元气满满、无聊中、想静静…）。每晚写完日记换一句个性签名（不带任何人名和私事）。'],
     ['自定义在线状态', on(cfg.diyStatus), (() => { const n = state._presence?.name || ''; return n.startsWith('diy:') ? `现在：${n.slice(4)}` : ''; })(), 'QQ 名字旁边的状态写她自己的一句话：自己找事做时“在刷B站：…”、录电台时“在录电台”、你电脑上在放歌时“陪你听：歌名”、生气委屈时一句心情（“别惹我”）；没有具体的事、或者在睡觉，就用预设的那几种。10 分钟内不来回换，设置失败 3 次就退回预设。'],
     ['心情头像', on(cfg.moodAvatar), (() => { const a = state._avatar || {}; const n = (() => { try { return fs.readdirSync(AVATAR_DIR).filter((f) => /\.(png|jpe?g|webp)$/i.test(f)).length; } catch { return 0; } })(); return `${n} 张图${a.name ? ` · 现在：${a.name}（${a.day === dayKey() ? `今天换了 ${a.count} 次` : '今天还没换'}）` : ''}`; })(), `她心情变了，QQ 头像跟着换成对应的图：${AVATAR_DIR} 里按名字放图（平常、开心、生气、委屈、困、睡觉、得意、烦、无聊、懒，没有的就用相近的，最后用“平常”），半夜换成“睡觉”。一天最多换 ${cfg.moodAvatarMaxDay} 次、两次至少隔 ${cfg.moodAvatarGapMin} 分钟，免得小号被风控。`],
-    ['QQ 空间说说', on(cfg.qzone), cfg.qzone ? `${{ 1: '所有人', 4: '好友', 64: '仅自己' }[cfg.qzoneRight] || cfg.qzoneRight}可见 · 一天最多一条` : '', `${cfg.qzoneHours.join('~')} 点之间偶尔发一条说说（大概两天一条），写她自己最近干的事（刷到的视频、出去玩…），有时配一张“现在的她”。只写她自己的事：不写聊天内容，写到最近聊过的人的名字、QQ 号就不发；开着 ChronoLife 时只用它记下的虚拟事件。主人私聊发 /说说 可以让她马上发一条。`],
+    ['QQ 空间说说', on(cfg.qzone), cfg.qzone ? `${{ 1: '所有人', 4: '好友', 64: '仅自己' }[cfg.qzoneRight] || cfg.qzoneRight}可见 · 一天最多一条` : '', `${cfg.qzoneHours.join('~')} 点之间偶尔发一条说说（大概两天一条），写她自己最近干的事（刷到的视频、出去玩…），有时配一张“现在的她”。只写她自己的事：不写聊天内容，写到最近聊过的人的名字、QQ 号就不发；开着 ChronoLife 时只用它记下的虚拟事件。主人私聊说“发条说说”可以让她马上发一条。`],
   ]],
   ['群聊', [
     ['群白名单', groups ? 'on' : 'off', groups ? `${groups} 个群` : '没配 ALLOWED_GROUPS，群消息一律不理', '只有白名单里的群会被理会。'],
@@ -209,6 +210,22 @@ const selfItems = Array.isArray(selfProfile.items) ? selfProfile.items : [];
 
 // ── render ────────────────────────────────────────────────────────────────
 const pill = { on: ['开', 'on'], off: ['关', 'off'], idle: ['开着·用不上', 'idle'], warn: ['注意', 'warn'], life: ['归 ChronoLife 管', 'idle'] };
+
+// --text：只在终端打印每个功能开没开、现在的设置（给机器人自己查“开了哪些功能”用，代替去读 .env）。
+// 不生成网页，也不带每个人的熟悉度和记得的事。
+if (argv.includes('--text')) {
+  const lines = [];
+  for (const [group, rows] of features) {
+    lines.push(`【${group}】`);
+    for (let [name, level, setting] of rows) {
+      const taken = cfg.chronolife && level === 'on' && LIFE_TAKEN[name];
+      if (taken && taken[1]) level = 'life';
+      lines.push(`- ${name}：${pill[level]?.[0] || level}${setting ? ` · ${String(setting).replace(/\s+/g, ' ')}` : ''}`);
+    }
+  }
+  console.log(lines.join('\n'));
+  process.exit(0);
+}
 const featureHtml = features
   .map(
     ([group, rows]) => `<h2>${esc(group)}</h2><div class="card"><table>${rows
@@ -276,24 +293,28 @@ ${peopleHtml}
 
 ${featureHtml}
 
-<h2>命令（在 QQ 里发）</h2>
+<h2>直接跟她说</h2>
+<div class="card"><table>
+<tr><td class="n">“半小时后提醒我喝水”</td><td>到点私聊“该喝水了”；“明早 8 点叫我起床”这种钟点也行，没说多久她会先问；问“我有哪些提醒”她知道</td></tr>
+<tr><td class="n">“我在杭州”</td><td>记下你在哪（看天气用）</td></tr>
+<tr><td class="n">“我生日 5 月 20 号”</td><td>记下你的生日</td></tr>
+<tr><td class="n">“给我看看你的日记”</td><td>把她最新一篇日记发给你</td></tr>
+<tr><td class="n">“唱首歌”“你会唱啥”</td><td>用她的嗓子唱一段，点名哪首、哪句那段也行</td></tr>
+<tr><td class="n">“用语音说句晚安”</td><td>用她的声音念出来</td></tr>
+<tr><td class="n">“给我写封信”“寄张明信片”</td><td>马上写一封信 / 寄一张旅行明信片（只在私聊）</td></tr>
+<tr><td class="n">“用电脑喇叭跟我说句晚安”</td><td>用她自己的声音从电脑喇叭说（开了电脑喇叭才有，只听主人的，夜里不出声）</td></tr>
+<tr><td class="n">“发条说说”</td><td>马上发一条 QQ 空间说说（只听主人的）</td></tr>
+<tr><td class="n">转发聊天记录 +“学第二个人”</td><td>学那个人的说话方式；问“你在学谁”她知道，说“别学了”就停掉并删掉素材</td></tr>
+<tr><td class="n">“帮我记着下周三考试”</td><td>开着 ChronoLife 时记下；“那条记错了 是周四”“那个别记了”也行；主人私聊说“这几天别主动找我”“歇会儿吧”就改开关</td></tr>
+</table><div class="how">她在回复里写个标记（[提醒:30|喝水] 这种），bridge 抠掉后照原来的命令去办，谁能办跟命令一样；不会另外发“已设置”。以前的 /提醒 /城市 /生日 /日记 /唱歌 /歌单 /说话 /信 /明信片 /说说 /学说话 /别学了 /生活 都还能用。</div></div>
+
+<h2>命令（在 QQ 里发，排错用）</h2>
 <div class="card"><table>
 <tr><td class="n">/status</td><td>在线状态、活跃任务数、熟悉度和综合分（给你排错用）</td></tr>
 <tr><td class="n">/心情</td><td>它回一句人话说心情，不报数字</td></tr>
 <tr><td class="n">/new</td><td>开新对话（清掉这个聊天的模型会话，长期事实和熟悉度不受影响）</td></tr>
-<tr><td class="n">/提醒 30m 喝水</td><td>到点私聊提醒；单发 /提醒 看列表</td></tr>
-<tr><td class="n">/唱歌 第一天</td><td>用她的嗓子唱一段（不写歌名就随便唱一首，不算每天的条数）</td></tr>
-<tr><td class="n">/歌单</td><td>它会唱哪些歌、每首几段</td></tr>
-<tr><td class="n">/说话 你好呀</td><td>用它的声音把这句念成语音发给你（试音色用，不算每天的条数）</td></tr>
-<tr><td class="n">/城市 杭州</td><td>告诉她你在哪（看天气用）；单发 /城市 看她记的是哪</td></tr>
-<tr><td class="n">/生日 5-20</td><td>告诉她你的生日</td></tr>
 <tr><td class="n">/喂鱼 /摸摸</td><td>亲密度 +1</td></tr>
-<tr><td class="n">/日记</td><td>看她最新一篇日记</td></tr>
-<tr><td class="n">/信</td><td>马上给你写一封信（算这周的；只在私聊）</td></tr>
-<tr><td class="n">/明信片</td><td>马上寄一张旅行明信片（只在私聊）</td></tr>
-<tr><td class="n">/说说</td><td>让她马上发一条 QQ 空间说说（只听主人的）</td></tr>
-<tr><td class="n">/学说话 /别学了</td><td>看她在学谁说话、学到几成；别学了就停掉并删掉素材</td></tr>
-<tr><td class="n">/生活 帮助</td><td>ChronoLife 的命令：/生活 状态、事件、记忆、记住 内容、更正 编号 新内容、删除 编号；主人私聊还有 主动 开/关、暂停/恢复、停用/启用、兴趣 plant 2</td></tr>
+<tr><td class="n">/help</td><td>看能直接跟她说哪些事</td></tr>
 </table></div>
 
 <h2>工具和文件</h2>

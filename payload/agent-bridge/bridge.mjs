@@ -52,9 +52,10 @@ import { createRadio, radioRequest, extractRadioTag, parseAsk, findRadioSong, ra
 import { getWeather, cachedWeather, notable, describe as describeWeather } from './weather.mjs';
 import { pickByMeaning, readIndex, writeIndex } from './stickers.mjs';
 import { pcSnapshot } from './pc.mjs';
-import { searchSong, pickSong, playInClient, openSongPage, songUrl } from './qqmusic.mjs';
+import { searchSong, pickSong, playInClient, songUrl, nowPlaying } from './qqmusic.mjs';
 import { genImage } from './imagegen.mjs';
 import { openLife, LifeAdapter } from './chronolife/adapter.mjs';
+import { watchLearnJobs } from './sing/learn.mjs';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 
@@ -471,11 +472,15 @@ async function pickForwardSpeaker(ev, text, chatKey) {
     p.misses = (p.misses || 0) + 1;
     return false; // 不是在选人：当普通聊天（会看到转发的内容）
   }
+  await learnPicked(ev, chatKey, p, who);
+  return true;
+}
+/** 选好了人就去学。大白话选的（[学说话:2]）她自己已经回过一句了，quiet 就不再说“我琢磨琢磨”。 */
+async function learnPicked(ev, chatKey, p, who, quiet = false) {
   pendingForward.delete(chatKey);
   const texts = p.lines.filter((l) => (l.uid || l.name) === who.key).map((l) => l.text);
-  await reply(ev, pick(['行 我琢磨琢磨', '好 我研究下 TA 怎么说话', '收到 我学学']));
+  if (!quiet) await reply(ev, pick(['行 我琢磨琢磨', '好 我研究下 TA 怎么说话', '收到 我学学']));
   learnStyle(ev, who, texts).catch((err) => log(`学说话失败: ${err.message}`));
-  return true;
 }
 /** 刚转发过来、还没选人的聊天记录：聊天时带上，对方问“这段在说啥”也能答。 */
 function forwardBlock(chatKey) {
@@ -530,14 +535,14 @@ async function learnStyle(ev, who, texts) {
   log(`学说话：开始学 ${who.name} 的说话方式（素材 ${merged.length} 条，习惯 ${traits.length} 条）`);
   await reply(ev, same ? '又多学了点 接着带' : '学到了 会慢慢被 TA 带跑偏的');
 }
-async function stopMimic(ev) {
+async function stopMimic(ev, quiet = false) {
   const a = readMimic().active;
   writeMimic({ active: null });
   try {
     fs.rmSync(MIMIC_SAMPLES, { recursive: true, force: true });
   } catch {}
   log(`学说话：停了${a ? `（${a.name}）` : ''}，素材已删`);
-  await reply(ev, a ? '行 不学了 记下来的也删了' : '本来就没在学');
+  if (!quiet) await reply(ev, a ? '行 不学了 记下来的也删了' : '本来就没在学'); // 大白话说的（[别学了]）她自己回过了
 }
 
 // ── 纪念日和天气 ──────────────────────────────────────────────────────────
@@ -1089,7 +1094,7 @@ function buildPrompt(ev, text, isGroup, chatKey, excludeIds = []) {
   const oldContext = `${selfBlock()}${mimicBlock()}${songBlock()}${radioBlock(ev, text)}${factBlock}${journalBlock(chatKey)}${forwardBlock(chatKey)}${busyBlock()}${pcBlock(ev.user_id, isGroup)}${isGroup ? '' : dreamBlock(chatKey)}${isGroup ? '' : tripBlock(ev.user_id)}${isGroup ? '' : giftBlock(ev.user_id)}${isGroup ? '' : rhythmBlock(ev.user_id)}${isGroup ? '' : curiousBlock(ev.user_id, chatKey)}${styleBlock}${memBlock}${groupBlock}${sulkBlock}`;
   const remembered = chronoAdapter ? chronoAdapter.filter(chatKey, oldContext) : cfg.chronolife ? '' : oldContext;
   const continuous = lifeNotesBlock(chatKey);
-  return `${head}${lifeBlock(ev.user_id)}${remembered}${continuous}\n\n---\n对方：${who}\n场景：${scene}\n对方刚说：\n${text}\n\n（不管做完没做完，最后都用 1-2 句话回对方，别只调工具就沉默。）${cfg.emotion ? MOOD_TAG_HINT : ''}${stickerHint(chatKey)}${photoHint(text, isGroup)}${giftHint(text, isGroup)}${musicHint(ev.user_id, text, isGroup)}`;
+  return `${head}${lifeBlock(ev.user_id)}${remembered}${continuous}\n\n---\n对方：${who}\n场景：${scene}\n对方刚说：\n${text}\n\n（不管做完没做完，最后都用 1-2 句话回对方，别只调工具就沉默。）${cfg.emotion ? MOOD_TAG_HINT : ''}${stickerHint(chatKey)}${photoHint(text, isGroup)}${giftHint(text, isGroup)}${musicHint(ev.user_id, text, isGroup)}${naturalHint(ev, isGroup, chatKey, text)}${guardHint(ev, isGroup)}`;
 }
 
 // ── OneBot helpers ────────────────────────────────────────────────────────
@@ -1268,8 +1273,25 @@ const fmtSize = (n) => (n >= 1048576 ? `${(n / 1048576).toFixed(1)}MB` : `${Math
 const fmtDur = (s) => `${Math.floor(s / 60)}:${String(Math.round(s % 60)).padStart(2, '0')}`;
 /** 跑一个 python 脚本（异步，不卡别的聊天），返回最后一行的 JSON（没有就 null）。 */
 function runPyJson(args, timeoutMs) {
+  return runJson(env.PYTHON || 'python', args, timeoutMs);
+}
+/**
+ * 本地 Whisper 听一段音频（live/phone_live.py asr，base 模型），返回 { text } 或 null。看视频、听 QQ 语音都走这个。
+ * ASR_SCRIPT 可以换成别的脚本（测试用假的；.mjs/.js 用 node 跑，别的用 python 跑），参数一样：asr <文件> --model base。
+ */
+function runAsr(file, timeoutMs) {
+  const script = env.ASR_SCRIPT || path.join(ROOT, 'live', 'phone_live.py');
+  return /\.m?js$/i.test(script) ? runJson(process.execPath, [script, 'asr', file, '--model', 'base'], timeoutMs) : runPyJson([script, 'asr', file, '--model', 'base'], timeoutMs);
+}
+/** 本地 Whisper 模型在不在（没有的话 phone_live.py 会去网上下，听 QQ 语音时不许联网，先看一眼）。WHISPER_MODEL_DIR 可指定。 */
+function localWhisper() {
+  if (env.ASR_SCRIPT) return true;
+  const dir = env.WHISPER_MODEL_DIR ? path.resolve(env.WHISPER_MODEL_DIR) : path.join(ROOT, '..', 'tools', 'whisper-models', 'base');
+  return fs.existsSync(path.join(dir, 'model.bin'));
+}
+function runJson(cmd, args, timeoutMs) {
   return new Promise((resolve) => {
-    const p = spawn(env.PYTHON || 'python', args, { windowsHide: true, env: { ...process.env, PYTHONIOENCODING: 'utf-8' } });
+    const p = spawn(cmd, args, { windowsHide: true, env: { ...process.env, PYTHONIOENCODING: 'utf-8' } });
     let out = '';
     const timer = setTimeout(() => p.kill(), timeoutMs);
     p.stdout.on('data', (d) => (out += d));
@@ -1338,7 +1360,7 @@ async function watchVideo(file, label = '一段视频') {
   const dur = fr?.duration || 0;
   let heard = '';
   if (dur > 0 && dur <= 600) {
-    const asr = await runPyJson([path.join(ROOT, 'live', 'phone_live.py'), 'asr', file, '--model', 'base'], 240_000);
+    const asr = await runAsr(file, 240_000);
     heard = String(asr?.text || '').trim();
   }
   const sheets = fr?.sheets || [];
@@ -1393,6 +1415,69 @@ async function readMedia(segs, ev) {
   }
   log(`收到${items.map((s) => (s.type === 'video' ? '视频' : '文件')).join('、')}：${notes.length} 个看过了`);
   return { note: notes.join('\n'), images };
+}
+
+// ── 听 QQ 语音：对方发来的 record 段（以前直接丢掉了）─────────────────────────────
+// get_record 让 NapCat 转成 wav（不行就 get_file 拿原文件，再不行用段里的 path / url）→ 本地 Whisper 听（跟看视频同一个 runAsr）
+// → “（发来语音：……）”拼进这轮的话。只用本地模型、不联网；没模型、没取到、没听出字，就回一句“没听清 打字吧”。群里一样，只是得先叫到她。
+const VOICE_IN_DIR = path.join(DATA_DIR, 'voice-in');
+const DEAF_LINES = ['没听清 打字吧', '这条语音我没听清 你打字说？', '语音没听出来 打字吧'];
+/** 这条消息里的语音：返回 { note }（听出来了）/ { failed: true }（没听成）/ null（没有语音或者 HEAR_VOICE 关了）。 */
+async function readVoice(segs, ev) {
+  const rec = segs.find((s) => s.type === 'record');
+  if (!rec || !cfg.hearVoice) return null;
+  const d = rec.data || {};
+  if (ev.message_type !== 'group') showTyping(ev);
+  if (!localWhisper()) {
+    log('听语音：本地没有 Whisper 模型，没听（不去网上下）');
+    return { failed: true };
+  }
+  fs.mkdirSync(VOICE_IN_DIR, { recursive: true });
+  const base = path.join(VOICE_IN_DIR, String(ev.message_id || Date.now()).replace(/[^\w-]/g, '_'));
+  let file = '';
+  const ref = d.file ? { file: String(d.file) } : d.file_id ? { file_id: String(d.file_id) } : null;
+  for (const params of ref ? [{ ...ref, out_format: 'wav' }, ref] : []) {
+    const action = params.out_format ? 'get_record' : 'get_file';
+    try {
+      const r = await sendRaw({ action, params });
+      const ext = params.out_format ? '.wav' : path.extname(String(r?.file || '')) || '.amr';
+      if (r?.file && fs.existsSync(r.file)) {
+        fs.copyFileSync(r.file, base + ext);
+        file = base + ext;
+      } else if (r?.base64) {
+        fs.writeFileSync(base + ext, Buffer.from(r.base64, 'base64'));
+        file = base + ext;
+      }
+      if (file) break;
+    } catch (err) {
+      log(`取语音失败（${action}）: ${err.message}`);
+    }
+  }
+  try {
+    if (!file && d.path && fs.existsSync(d.path)) {
+      file = base + (path.extname(d.path) || '.amr');
+      fs.copyFileSync(d.path, file);
+    } else if (!file && d.url && /^https?:/i.test(d.url)) {
+      file = await downloadTo(d.url, base + '.amr', 20 * 1048576);
+    }
+  } catch (err) {
+    log(`取语音失败（按地址下）: ${err.message}`);
+    file = '';
+  }
+  const olds = fs.readdirSync(VOICE_IN_DIR).map((f) => path.join(VOICE_IN_DIR, f)).filter((f) => f !== file);
+  for (const old of olds.sort((a, b) => fs.statSync(a).mtimeMs - fs.statSync(b).mtimeMs).slice(0, -30)) fs.rmSync(old, { force: true }); // 只留最近 30 个
+  if (!file || !fs.existsSync(file)) {
+    log('听语音：没取到语音文件');
+    return { failed: true };
+  }
+  const r = await runAsr(file, 120_000);
+  const heard = String(r?.text || '').replace(/\s+/g, ' ').trim();
+  if (!heard) {
+    log('听语音：没听出字');
+    return { failed: true };
+  }
+  log(`听语音：听出 ${heard.length} 字`);
+  return { note: `（发来语音：${heard.slice(0, 500)}）` };
 }
 
 /** Download QQ image segments so the agent can inspect them with read_image. */
@@ -1768,11 +1853,18 @@ function findSong(songs, name) {
 async function sendSong(target, name, opts = {}) {
   const songs = readSongs();
   if (!songs.length) return 'none';
-  const song = findSong(songs, name);
+  // [唱歌:歌名/一句歌词] 点名唱哪一段；没写斜杠时，歌名后面多出来的字也当歌词
+  const [title, ...rest] = String(name || '').split(/[\/｜|]/);
+  const song = findSong(songs, title.trim());
   if (!song) return 'unknown';
   const key = `${target.message_type}:${target.group_id || target.user_id}`;
-  const pool = song.clips.length > 1 ? song.clips.filter((c) => `${song.title}/${c.file}` !== lastSung.get(key)) : song.clips;
-  const clip = pool[Math.floor(Math.random() * pool.length)];
+  const hint = rest.length ? rest.join(' ') : String(title).replace(song.title, '');
+  const clip =
+    pickClipByLyrics(song.clips, hint) ||
+    (() => {
+      const pool = song.clips.length > 1 ? song.clips.filter((c) => `${song.title}/${c.file}` !== lastSung.get(key)) : song.clips;
+      return pool[Math.floor(Math.random() * pool.length)];
+    })();
   try {
     const wait = Math.min(8000, (clip.sec || 20) * 150) - (opts.credit || 0);
     if (wait > 0) await sleep(wait * pace());
@@ -1788,15 +1880,39 @@ async function sendSong(target, name, opts = {}) {
     return 'fail';
   }
 }
-/** 提示词里告诉它会唱哪些歌。 */
+/** 歌词里去掉“郭：”这种分声部的标记和标点，只留字。 */
+const lyricText = (s) => String(s || '').replace(/(^|[，,\s])[^，,\s：:]{1,3}[：:]/g, '$1').replace(/[\s，,。.!！?？、~～"“”'‘’《》…-]/g, '');
+/** 按一句歌词挑最像的那段：两个字两个字地比，对上最多的赢（Whisper 听写有错字也能对上）；一个都对不上返回 null。 */
+function pickClipByLyrics(clips, hint) {
+  const h = lyricText(hint);
+  if (h.length < 2) return null;
+  const grams = new Set(Array.from({ length: h.length - 1 }, (_, i) => h.slice(i, i + 2)));
+  let best = null;
+  let bestScore = 0;
+  for (const c of clips) {
+    const t = lyricText(c.lyrics);
+    let score = 0;
+    for (const g of grams) if (t.includes(g)) score++;
+    if (score > bestScore) [best, bestScore] = [c, score];
+  }
+  return bestScore >= Math.min(2, grams.size) ? best : null;
+}
+/** 提示词里告诉它会唱哪些歌；一首学了好几段的，列出每段开头的歌词，好让它点名唱哪段。 */
 function songBlock() {
   if (!cfg.sing) return '';
   const songs = readSongs();
   if (!songs.length) return '';
-  const list = songs.map((s) => `${s.title}${s.artist ? `（${s.artist}）` : ''}`).join('、');
+  const head = (c) => String(c.lyrics || '').replace(/(^|[，,\s])[^，,\s：:]{1,3}[：:]/g, '$1').split(/[，,]/).filter(Boolean).slice(0, 2).join('，');
+  const list = songs
+    .map((s) => {
+      const name = `${s.title}${s.artist ? `（${s.artist}）` : ''}`;
+      const parts = s.clips.filter((c) => c.lyrics).map((c) => `「${head(c)}…」`);
+      return parts.length > 1 ? `${name}：会 ${parts.length} 段 ${parts.join(' ')}` : name;
+    })
+    .join('；');
   const left = (singDay.day === dayKey() ? cfg.singMaxDay - singDay.count : cfg.singMaxDay);
   return left > 0
-    ? `\n\n---\n你学会唱的歌：${list}。想唱就在回复里写 [唱歌:歌名]（随便唱一首就写 [唱歌]），会用你自己的嗓子唱一段发过去，可以先说一句再唱。对方让你唱、想哄人、心情特别好的时候可以唱，别动不动就唱。不在这里的歌就说还没学会，别硬唱。`
+    ? `\n\n---\n你学会唱的歌：${list}。想唱就在回复里写 [唱歌:歌名]（随便唱一首就写 [唱歌]），会用你自己的嗓子唱一段发过去，可以先说一句再唱。对方点名要听某一段，就写 [唱歌:歌名/那段里的一句歌词]，比如 [唱歌:${songs[0].title}/${head(songs[0].clips[songs[0].clips.length - 1]).split('，')[0].trim() || '一句歌词'}]；要的那段没学过就说还没学到那儿。对方让你唱、想哄人、心情特别好的时候可以唱，别动不动就唱。不在这里的歌就说还没学会，别硬唱。`
     : `\n\n---\n你今天已经唱了好几段了，嗓子累了，别再唱了；对方要听就说明天再唱。`;
 }
 
@@ -1930,7 +2046,7 @@ async function genProactive(qq, kind, extra = '') {
     const ignored = userState(qq).ignored || 0;
     const ignoredNote = ignored ? `\n你上次主动找对方，对方到现在还没回。别装没事人一样热情，可以带点“又不理我”的小别扭，但别抱怨个没完。` : '';
     const prompt = `${persona()}${lifeBlock(qq)}${selfBlock()}${mimicBlock()}\n\n---\n${scene}。${ignoredNote}${factBlock}\n你记得最近聊过：\n${mem || '（没什么印象）'}\n\n像真人突然发消息：1-2 句，可以分享你刚看到/想到/正在忙的一件事，或者接着上次的话题问一句。不要客服腔，不要问“需要我做什么”，不要列清单。只输出要发的话。`;
-    const r = await runAgent(prompt, null);
+    const r = await runAgent(prompt, null, { permissionMode: 'read-only' }); // 主动消息只要一句话，不用工具
     return humanize(r.text).trim();
   } catch (err) {
     log(`主动消息生成失败: ${err.message}`);
@@ -1960,7 +2076,7 @@ async function extractFacts(chatKey) {
       `- 对方提到了将来某个时间点的事时，才写 followups：ask 是你之后想顺口问的话题（例如“问问考试考得怎么样”），at 是事情发生之后你想问的时间，晚上 8 点前、早上 9 点后。没有就留空数组。\n` +
       `- style 只看“对方”说的话：反复出现的口头禅、语气词、爱用的梗和外号、标点/表情习惯（比如“爱说『草』”“句尾老带『捏』”“喜欢叫你『小笨蛋』”“不爱打标点”）。只写确实出现过两次以上的，每条不超过 20 字，别写你自己的说话方式，别重复已有的。\n` +
       `- 没什么可更新的就输出 {"add":[],"drop":[],"followups":[],"style":[],"styleDrop":[]}。`;
-    const r = await runAgent(prompt, null);
+    const r = await runAgent(prompt, null, { permissionMode: 'read-only' }); // 只要一段 JSON，不用工具
     const out = parseJsonLoose(r.text);
     if (!out) {
       log(`事实提炼：模型没给出可解析的 JSON（${chatKey}）`);
@@ -2566,6 +2682,38 @@ async function monitorPhone(ev, isRunning) {
 }
 
 // ── Agent invocation ──────────────────────────────────────────────────────
+/**
+ * 杀掉一个子进程连同它开出来的子进程。Windows 上 child.kill() 只杀 dsh 自己，它敲的命令（node、python、powershell）会留下来
+ * 接着跑、还攥着会话的写锁，所以用 taskkill /T /F 杀整棵树；别的系统照旧 kill。已经退出的不碰（PID 可能被别人用了）。
+ */
+function killTree(child) {
+  return new Promise((resolve) => {
+    if (!child?.pid || child.exitCode !== null || child.signalCode !== null) return resolve();
+    if (process.platform !== 'win32') {
+      try {
+        child.kill();
+      } catch {}
+      return resolve();
+    }
+    try {
+      const k = spawn('taskkill', ['/T', '/F', '/PID', String(child.pid)], { windowsHide: true, stdio: 'ignore' });
+      k.on('error', () => {
+        try {
+          child.kill();
+        } catch {}
+        resolve();
+      });
+      k.on('close', resolve);
+    } catch {
+      try {
+        child.kill();
+      } catch {}
+      resolve();
+    }
+  });
+}
+/** 会话本身没了 / 坏了（dsh 的报错：session "…" not found、stored session … failed validation 这些）才值得丢掉重开；超时、起不来这种不是会话的错。 */
+const SESSION_GONE = /session[^\n]{0,160}?(not found|was not found|failed validation|identity mismatch|unknown to this harness|unsupported legacy|shrank below)|SessionFormatUnsupported|raw log:/i;
 /** opts.permissionMode：这一次调用单独降权（比如群里插嘴只让它聊天，不让碰工具）。 */
 function runAgent(prompt, sessionId, opts = {}) {
   return new Promise((resolve, reject) => {
@@ -2601,6 +2749,13 @@ function runAgent(prompt, sessionId, opts = {}) {
 
     let settled = false;
     let timer;
+    const unlinkOut = () => {
+      for (const file of [outPath, errPath]) {
+        try {
+          fs.unlinkSync(file);
+        } catch {}
+      }
+    };
     const cleanup = () => {
       clearTimeout(timer);
       for (const fd of [outFd, errFd]) {
@@ -2608,19 +2763,13 @@ function runAgent(prompt, sessionId, opts = {}) {
           fs.closeSync(fd);
         } catch {}
       }
-      for (const file of [outPath, errPath]) {
-        try {
-          fs.unlinkSync(file);
-        } catch {}
-      }
     };
     const settle = (fn, value) => {
       if (settled) return;
       settled = true;
-      try {
-        child.kill();
-      } catch {}
       cleanup();
+      // 超时 / 出错时它还在跑：整棵进程树一起杀掉（它敲的命令、刷 B站 的脚本这些子进程也别留着占会话的锁），杀完再删输出文件
+      killTree(child).then(unlinkOut, unlinkOut);
       fn(value);
     };
     timer = setTimeout(() => settle(reject, new Error(`处理超时（${cfg.timeoutMs / 1000}s）`)), cfg.timeoutMs);
@@ -2763,6 +2912,410 @@ function radioBlock(ev, text) {
   return `\n\n---\n你自己弄了个小节目「${cfg.botName}的深夜电台」：有人点，你就录一期两三分钟的语音（或者一分钟版），配张节目卡、推荐一首歌。${lastLine}对方想听你录一期、要投稿让你念、要你接着上期讲、或者说只听一分钟，就像平时一样先回一句（比如“行 等我录一下”），再在回复最后加 [电台:主题]（一分钟版 [电台:一分钟|主题]，接着上期 [电台:续上期]，念投稿 [电台:投稿]——稿子就是对方这次发来的话；对方说要投稿但还没发内容，就让 TA 发来，先别加）。只是聊到电台、没想听，就别加。`;
 }
 
+// ── 大白话办事：以前要发斜杠命令的事，现在直接跟她说就行 ─────────────────────────────
+// 模型在回复里写个标记（[提醒:30|喝水] [城市:杭州] [生日:5-20] [看日记] [写信] [寄明信片] [发说说]
+// [学说话:2] [别学了] [记住:…] [忘掉:…] [更正:…|…] [生活:主动 关] [喇叭:要说的话]），发出去之前抠掉，回完这句再去办，
+// 跟斜杠命令走同一套（谁能办照旧按发消息的人算）；她自己已经回过一句了，办完不再另外发“好，30 分钟后提醒你”这种。
+// 斜杠命令照样能用。/new /status 这些排错的不教给模型，只能自己发。
+function addReminder(qq, at, text) {
+  reminders.push({ qq: String(qq), at, text });
+  saveReminders();
+}
+/** 记下对方在哪：先查一下这个地方的天气，查不到就不记（抛错）。 */
+async function saveCity(qq, c) {
+  const w = await getWeather(c);
+  userState(qq).city = c;
+  saveState();
+  return w;
+}
+/** 最新一篇日记（只带跟这个人的那行）；还没写过返回空。 */
+function journalText(chatKey) {
+  const d = journalDays().at(-1);
+  const j = d ? readJournal(d) : null;
+  if (!j) return '';
+  const mine = j.with?.[chatKey] ? `\n跟你：${j.with[chatKey]}` : '';
+  return `${shortDay(d)}\n${j.day}${mine}`;
+}
+/** 提醒的时间说成人话：今天 08:00 / 明天 08:00 / 11月3日 08:00。 */
+function whenDesc(at) {
+  const d = new Date(at);
+  const hm = `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+  const diff = Math.round((Date.parse(dayKey(d)) - Date.parse(dayKey())) / 86400_000);
+  return diff === 0 ? `今天 ${hm}` : diff === 1 ? `明天 ${hm}` : diff === 2 ? `后天 ${hm}` : `${d.getMonth() + 1}月${d.getDate()}日 ${hm}`;
+}
+/**
+ * [提醒:时间|内容] 的时间：分钟数（30、2小时、0.5）或钟点（2026-10-29 08:00、10-29 08:00、明天 8:00、21:30）。
+ * 得在以后（至少 1 秒）、一年以内；看不懂、已经过了的返回 null。
+ */
+const REMIND_MAX_MS = 366 * 86400_000;
+function parseRemind(body) {
+  const [rawWhen, ...rest] = String(body || '').split(/[|｜]/);
+  let what = rest.join(' ').replace(/\s+/g, ' ').trim();
+  if (/^该.+了$/.test(what)) what = what.slice(1, -1); // 到点发的是“该…了”，别变成“该该喝水了了”
+  what = what.slice(0, 100);
+  const w = String(rawWhen || '').trim();
+  if (!what || !w) return null;
+  const now = Date.now();
+  const hm = (h, mi) => Number(h) <= 23 && Number(mi || 0) <= 59;
+  let at = NaN;
+  let m;
+  if ((m = w.match(/^(\d+(?:\.\d+)?)\s*(分钟|分|min|m|小时|个小时|h|hour)?后?$/i))) {
+    at = now + Number(m[1]) * (/小时|^h|hour/i.test(m[2] || '') ? 3600_000 : 60_000);
+  } else if ((m = w.match(/^(?:(\d{4})[-/.年])?(\d{1,2})[-/.月](\d{1,2})[日号]?\s*(\d{1,2})[:：点](\d{1,2})?分?$/))) {
+    if (!hm(m[4], m[5])) return null;
+    const d = new Date(m[1] ? Number(m[1]) : new Date().getFullYear(), Number(m[2]) - 1, Number(m[3]), Number(m[4]), Number(m[5] || 0));
+    if (d.getMonth() !== Number(m[2]) - 1 || d.getDate() !== Number(m[3])) return null; // 2 月 30 号这种
+    at = d.getTime();
+  } else if ((m = w.match(/^(今天|明天|后天)?\s*(\d{1,2})[:：点](\d{1,2})?分?$/))) {
+    if (!hm(m[2], m[3])) return null;
+    const d = new Date();
+    d.setHours(Number(m[2]), Number(m[3] || 0), 0, 0);
+    d.setDate(d.getDate() + ({ 明天: 1, 后天: 2 }[m[1]] || 0));
+    if (!m[1] && d.getTime() <= now) d.setDate(d.getDate() + 1); // 只说了钟点、今天已经过了：算明天的
+    at = d.getTime();
+  }
+  if (!Number.isFinite(at) || at - now < 1000 || at - now > REMIND_MAX_MS) return null;
+  return { at, text: what };
+}
+/** 写信（/信 或者 [写信]）。大白话的她已经回过“等我写写”了，natural 就不再说；办不了只记日志。 */
+async function startLetter(ev, natural = false) {
+  const no = async (line, why) => {
+    if (natural) log(`大白话写信：没写（${why}）`); // 大白话的她已经答应了，办不成也得补一句
+    await reply(ev, line);
+  };
+  if (!cfg.letter || ev.message_type === 'group') return void (await no(cfg.letter ? '信私聊写' : '还没学会写信', cfg.letter ? '群里不写' : '没开写信'));
+  if (letterRunning) return void (await no('在写了 别催', '正在写'));
+  letterRunning = true;
+  try {
+    if (!natural) await reply(ev, pick(['等我写写', '行 给你写一封', '写信得酝酿一下 等着']));
+    userState(ev.user_id).letterWeek = weekKey(); // 算这周的
+    saveState();
+    await writeLetter(ev.user_id, ev);
+  } catch (err) {
+    log(`写信失败: ${err.message}`);
+    await reply(ev, '没写出来 改天再写');
+  } finally {
+    letterRunning = false;
+  }
+}
+/** 发说说（/说说 或者 [发说说]），只听主人的。发了什么还是告诉主人一声。 */
+async function startQzone(ev, natural = false) {
+  const no = async (line, why) => {
+    if (natural) log(`大白话说说：没发（${why}）`);
+    await reply(ev, line);
+  };
+  if (!cfg.qzone || ev.message_type === 'group' || String(ev.user_id) !== pcOwner()) return void (await no(cfg.qzone ? '这个只听主人的' : '还没开 QQ 空间', cfg.qzone ? `${ev.user_id} 不是主人或者在群里` : '没开 QQ 空间'));
+  if (qzoneRunning) return void (await no('在发了 别催', '正在发'));
+  qzoneRunning = true;
+  try {
+    const r = await postQzone();
+    (state._qzone ||= {}).day = dayKey();
+    saveState();
+    if (natural) log(r.ok ? `大白话说说：发了一条（${r.text.length} 字${r.photo ? '，配了张照片' : ''}）` : `大白话说说：这次没发（${r.why}）`);
+    await reply(ev, r.ok ? `发了：${r.text}${r.photo ? '（配了张照片）' : ''}` : `没发（${r.why}）`, { whole: true });
+  } catch (err) {
+    log(`QQ 空间没发成: ${err.message}`);
+    await reply(ev, '没发出去 QQ 空间那边不让');
+  } finally {
+    qzoneRunning = false;
+  }
+}
+/** 寄明信片（/明信片 或者 [寄明信片]）：有攒着的先给攒着的，没有就现去一趟。 */
+async function startPostcard(ev, natural = false) {
+  const no = async (line, why) => {
+    if (natural) log(`大白话明信片：没寄（${why}）`);
+    await reply(ev, line);
+  };
+  if (!cfg.postcard || ev.message_type === 'group') return void (await no(cfg.postcard ? '明信片私聊给你' : '还没出去玩过', cfg.postcard ? '群里不寄' : '没开明信片'));
+  if (tripRunning) return void (await no('在写了 别催', '正在寄'));
+  tripRunning = true;
+  try {
+    const t = state._trips || (state._trips = { history: [] });
+    const pending = String(ev.user_id) === tripTo() ? t.cur?.pending : null;
+    if (pending) {
+      t.cur.pending = null; // 周末寄的那张还没给：先给这张
+      saveState();
+      if (!natural) await reply(ev, `早给你寄了 从${t.cur.city}寄的`);
+      return void (await givePostcard(ev, pending, t.cur));
+    }
+    if (!natural) await reply(ev, pick(['等我找张明信片', '行 给你寄一张', '我想想从哪寄']));
+    const trip = t.cur && !t.cur.sent ? t.cur : { ...pickPlace(), planned: dayKey(), until: dayKey(), sent: false };
+    if (t.cur && t.cur !== trip) t.history = [...t.history, { city: t.cur.city, spot: t.cur.spot, planned: t.cur.planned }].slice(-12);
+    t.cur = trip; // 这周已经说好要去的就寄那儿的，没有就现去一趟
+    saveState();
+    await sendPostcard(ev.user_id, trip, ev);
+  } catch (err) {
+    log(`明信片失败: ${err.message}`);
+    await reply(ev, '没寄出来 改天再寄');
+  } finally {
+    tripRunning = false;
+  }
+}
+/** /help：告诉对方这些直接说就行，只把排错用的列成命令。 */
+function helpText(ev) {
+  const isGroup = ev.message_type === 'group';
+  const uid = String(ev.user_id);
+  const lifeOwner = cfg.chronolife && chronoAdapter && !isGroup && uid === chronoAdapter.owner;
+  const ex = [
+    '“半小时后提醒我喝水”“明早 8 点叫我起床”“我有哪些提醒”',
+    cfg.weather ? '“我在杭州”' : '',
+    '“我生日 5 月 20 号”',
+    cfg.sing && readSongs().length ? '“唱首歌”“你会唱啥”' : '',
+    cfg.voice ? '“用语音说句晚安”' : '',
+    !isGroup && cfg.speaker && cfg.voice && uid === pcOwner() ? '“用电脑喇叭跟我说句晚安”' : '',
+    cfg.hearVoice ? '直接发语音也行' : '',
+    !isGroup && cfg.playMusic && uid === pcOwner() ? '“放首歌”“别放了”“切一首”“小声点”' : '',
+    !isGroup && cfg.draw && env.DASHSCOPE_API_KEY && uid === pcOwner() ? '“给我画只猫”' : '',
+    cfg.radio ? '“开台，聊聊下雨天”（想听电台）' : '',
+    cfg.journal ? '“给我看看你的日记”' : '',
+    !isGroup && cfg.letter ? '“给我写封信”' : '',
+    !isGroup && cfg.postcard ? '“给我寄张明信片”' : '',
+    !isGroup && cfg.qzone && uid === pcOwner() ? '“发条说说”' : '',
+    !isGroup && cfg.mimic ? '把聊天记录合并转发给我，再说“学第二个人”；不想要了说“别学了”' : '',
+    cfg.chronolife && chronoAdapter ? `“帮我记着下周三考试”“那条记错了 是周四”${lifeOwner ? '“这几天别主动找我”' : ''}` : '',
+  ].filter(Boolean);
+  return `直接跟我说就行，不用记命令，比如：\n${ex.map((x) => `· ${x}`).join('\n')}\n\n排错用的：/status 看状态 · /心情 · /new 开新对话\n（以前的 /提醒 /城市 这些命令也还能用）`;
+}
+/** 提示词里教她写这些标记。功能关着的不教；只在对方明确要办的时候写。 */
+function naturalHint(ev, isGroup, chatKey, text = '') {
+  const uid = String(ev.user_id);
+  const out = [];
+  out.push('对方让你过会儿或到点提醒 TA 做什么：写 [提醒:几分钟后|提醒啥]（“半小时后”写 30，“两个小时后”写 120）；说的是钟点就写 [提醒:年-月-日 时:分|提醒啥]（照上面【此刻】的日期时间算，比如“明天早上8点”）。提醒啥写短点，像“喝水”“出门拿快递”，到点会私聊发“该喝水了”。没说什么时候就先问，别自己定。');
+  out.push('[提醒] 只能设一次性的：对方要“每天”“每周”这种重复的，就设最近的那一次，跟 TA 说清楚每天重复的还不支持；别自己去建计划任务、定时任务。');
+  const mine = isGroup ? [] : reminders.filter((r) => r.qq === uid && r.at > Date.now()).sort((a, b) => a.at - b.at);
+  if (mine.length) out.push(`你答应了到点提醒对方的（对方问有哪些提醒就照这个说）：${mine.slice(0, 8).map((r) => `${whenDesc(r.at)} ${r.text}`).join('；')}${mine.length > 8 ? `，一共 ${mine.length} 个` : ''}`);
+  if (cfg.weather) out.push('对方说了自己住哪个城市、人在哪（比如“我在杭州”“我搬去成都了”）：写 [城市:城市名]，以后就知道 TA 那边天气；只是出去玩、路过的不算。');
+  out.push('对方告诉你 TA 的生日：写 [生日:月-日]，比如 [生日:5-20]；农历的别写。');
+  if (cfg.journal && journalDays().length) out.push('对方想看你的日记、你也愿意给看：写 [看日记]，会把最近一篇发过去。');
+  if (!isGroup && cfg.letter) out.push('对方想让你给 TA 写封信：写 [写信]，先回一句（比如“行 等我写写”），写好了会发过去。');
+  if (!isGroup && cfg.postcard) out.push('对方想要你寄张明信片：写 [寄明信片]，先回一句，寄好了会发过去。');
+  if (!isGroup && cfg.qzone && uid === pcOwner()) out.push('对方让你发条 QQ 空间说说：写 [发说说]，会拿你最近自己干的事写一条发出去。');
+  if (!isGroup && cfg.speaker && cfg.voice && uid === pcOwner()) {
+    const sp = state._pc?.speak;
+    const used = sp?.askDay === dayKey() ? sp.asked || 0 : 0;
+    out.push(pcQuiet()
+      ? '对方让你用电脑喇叭说话：现在是夜里（或者你在歇着），喇叭不出声，跟 TA 说明天再说，别写标记，也别自己去调系统语音念。'
+      : used >= cfg.speakerAskMaxDay
+        ? `对方让你用电脑喇叭说话：今天喇叭已经说了 ${used} 句，说不动了，直接跟 TA 说明天再喊，别写标记，也别自己去调系统语音念。`
+        : '对方让你用电脑喇叭说句话（比如“用喇叭跟我说句晚安”）：写 [喇叭:要说的话]，会用你自己的声音从电脑喇叭放出来。想从喇叭出声只能写这个，别自己去调系统语音（SpeechSynthesizer、SAPI、say 这些）念，那是机器声。');
+  } else if (SPEAK_ASK.test(text)) {
+    // 喇叭说不了：告诉她为啥，让她直接跟对方说（别拿系统语音顶）
+    const why = !cfg.speaker ? '电脑喇叭这功能没开' : !cfg.voice ? '你的声音（语音）没配好' : isGroup ? '这是群里，喇叭只听主人私聊的' : '对方不是电脑的主人，喇叭只听主人的';
+    out.push(`对方让你用电脑喇叭说话：现在说不了（${why}），直接跟 TA 说一声，别写标记，也别自己去调系统语音念。`);
+  }
+  if (isOwnerChat(ev)) out.push(`你截了图（手机截图、看直播的截图、拍的现场照）想给对方看：写 [发图:图片的完整路径]，会直接发到这个聊天。只能发你自己弄出来的图（${DATA_DIR} 下面 ${PIC_DIRS.join('、')} 这几个文件夹里的）；别自己去连 OneBot / NapCat 发。`);
+  if (cfg.draw && isOwnerChat(ev)) {
+    const d = state._draw?.day === dayKey() ? state._draw.count : 0;
+    out.push(!env.DASHSCOPE_API_KEY
+      ? '对方让你画画：你现在画不了（画图没配好），直接跟 TA 说画不了；别自己去找 key 调画图接口。'
+      : d >= cfg.drawMaxDay
+        ? `对方让你画画：今天已经画了 ${d} 张，画不动了，跟 TA 说明天再画，别写标记。`
+        : `对方让你画张图（“画只猫”“给我画个头像”）：写 [画:画面描述]（写清楚画什么、什么风格），会画一张发过去，要半分钟到一分钟，先回一句；今天还能画 ${cfg.drawMaxDay - d} 张。想画只能写这个标记，别自己拿 key 去调画图接口。`);
+  } else if (cfg.draw && DRAW_ASK.test(text)) out.push('对方让你画画：画画只给主人画（得主人私聊），直接跟 TA 说画不了。');
+  if (!isGroup && cfg.mimic) {
+    const p = pendingForward.get(chatKey);
+    const a = readMimic().active;
+    if (p && Date.now() - p.at <= 15 * 60_000) out.push(`转给你的聊天记录里有：${p.speakers.map((s, i) => `${i + 1}. ${s.name}`).join('，')}。对方说要学里面谁说话：写 [学说话:序号]；说不学了：写 [别学了]。`);
+    else if (a) out.push(`对方问你在学谁说话：在学 ${a.name} 的，学了 ${Math.max(1, Math.round((Date.now() - a.startedAt) / 86400_000))} 天、大概 ${Math.round(mimicStrength(a) * 10)} 成了；对方让你别学了：写 [别学了]（学到的会删掉）。`);
+    else out.push('对方想让你学谁说话：让 TA 把那人的聊天记录合并转发给你。');
+  }
+  if (cfg.chronolife && chronoAdapter) {
+    const s = withLife(() => chrono.settings(), null);
+    if (s?.enabled) out.push('对方明确让你记住一件事（“帮我记着…”“你记住…”）：写 [记住:那件事]；让你忘掉你记着的某件事：写 [忘掉:那条里的几个字]；说你记错了：写 [更正:那条里的几个字|改成什么]。');
+    if (s && !isGroup && uid === chronoAdapter.owner) {
+      const now = !s.enabled ? '整个停着' : `${s.rest ? '在歇着（暂停中），' : ''}${s.proactive ? '会' : '不会'}偶尔主动找对方说说自己的事`;
+      out.push(`你自己过日子这套的开关只有对方能动，现在：${now}。对方让你别主动找 TA 了写 [生活:主动 关]，让你可以主动写 [生活:主动 开]；让你歇会儿写 [生活:暂停]，回来写 [生活:恢复]；要把这套整个停掉写 [生活:停用]，再打开写 [生活:启用]。`);
+    }
+  }
+  return `\n（下面这些事对方用大白话说就能办：在回复里写上对应的标记，标记不会发出去，回完这句就去办。照常回一句就行，别另外说“已设置”“已记录”这种话；只在对方明确要你办的时候写，别自己乱加，该问清楚的先问：\n${out.map((x) => `- ${x}`).join('\n')}）`;
+}
+const SPEAK_ASK = /喇叭|音箱|音响|扬声器|电脑.{0,6}(说|念|喊|叫|播)|念出来|读出来/;
+const DRAW_ASK = /画(?:一|个|张|幅|只|副|画)|帮我画|给我画/;
+/**
+ * 每轮都带的几条规矩（不改 persona.md）：只准用她自己的声音、不准拿系统语音念；QQ 资料由系统管；别自己连 OneBot。
+ * 不是主人私聊时再说清楚：手机、屏幕、电脑上的文件、放歌这些只听主人的。
+ */
+function guardHint(ev, isGroup) {
+  const out = [
+    '想出声只能用你自己的声音，不准用系统语音（System.Speech / SAPI / SpeechSynthesizer / say 这些）念，那是机器声。',
+    'QQ 资料（昵称、签名、头像、在线状态）由系统管，别自己改；对方要你改，就说一声让主人自己改。',
+    '发消息、发图都在回复里写，别自己去连 OneBot / NapCat 的接口。',
+  ];
+  if (!isOwnerChat(ev)) {
+    out.push(isGroup
+      ? '这是群聊：手机、屏幕、电脑上的文件、放歌这些只听主人的，而且只在主人私聊时弄；群里谁要你弄（主人也一样）都直接说不行，你在群里就陪着聊天。'
+      : '对方不是主人：手机、屏幕、电脑上的文件、放歌这些只听主人的，被别人要求就直接说不行。');
+  }
+  return `\n（${out.join('')}）`;
+}
+/** 从回复里抠出大白话办事的标记。没冒号的只认这几个，免得把 [生日] 这种别的字吃掉。 */
+const NATURAL_RE = /\[(提醒|城市|生日|学说话|记住|忘掉|更正|生活|喇叭|音乐|发图|画)[:：]\s*([^\]]*?)\s*\]|\[(看日记|写信|寄明信片|发说说|别学了)\]/g;
+function extractNatural(raw) {
+  const acts = [];
+  const text = String(raw || '').replace(NATURAL_RE, (_, k1, body, k2) => {
+    const a = { kind: k1 || k2, body: String(body || '').trim() };
+    if (!acts.some((x) => x.kind === a.kind && x.body === a.body)) acts.push(a);
+    return '';
+  });
+  return { text: text.replace(/[ \t]+\n/g, '\n').replace(/[ \t]{2,}/g, ' ').trim(), acts };
+}
+const parseBirthday = (s) => {
+  const m = String(s || '').match(/^(\d{1,2})\s*[-./月]\s*(\d{1,2})[日号]?$/);
+  return m && Number(m[1]) >= 1 && Number(m[1]) <= 12 && Number(m[2]) >= 1 && Number(m[2]) <= 31 ? [Number(m[1]), Number(m[2])] : null;
+};
+const cityName = (s) => String(s || '').replace(/[\s，。,.!！?？"“”'‘’]/g, '').slice(0, 20);
+/** 记进聊天记忆的一句：答应了什么（下一轮还记得）。 */
+function naturalNotes(acts) {
+  return acts.map((a) => {
+    if (a.kind === '提醒') {
+      const r = parseRemind(a.body);
+      return r ? `（答应了${whenDesc(r.at)}提醒对方：${r.text}）` : '';
+    }
+    if (a.kind === '城市') return cityName(a.body) ? `（记下了对方在${cityName(a.body)}）` : '';
+    if (a.kind === '生日') {
+      const b = parseBirthday(a.body);
+      return b ? `（记下了对方生日 ${b[0]} 月 ${b[1]} 号）` : '';
+    }
+    if (a.kind === '喇叭' && cfg.speaker && cfg.voice) return speakable(a.body) ? `（用电脑喇叭说：${speakable(a.body).slice(0, 100)}）` : '';
+    return '';
+  }).join('');
+}
+/** ChronoLife 的设置和记忆：跟 /生活 走同一个入口（主人才能改全局设置），回的话只记日志。 */
+async function lifeCmd(ev, chatKey, isGroup, arg) {
+  if (!cfg.chronolife || !chronoAdapter) {
+    log(`大白话生活：没开，「${arg.slice(0, 40)}」不办`);
+    return void (await reply(ev, '这个我现在记不了 回头再说'));
+  }
+  const out = [];
+  await chronoAdapter.command({ text: `/生活 ${arg}`, scope: chatKey, userId: ev.user_id, isGroup, send: async (line) => out.push(line) });
+  log(`大白话生活「${arg.slice(0, 40)}」：${out.join(' / ').replace(/\s+/g, ' ').slice(0, 120)}`);
+  const said = out.join(' ');
+  if (/请由主人/.test(said)) await reply(ev, '这个得主人说了算');
+  else if (/不能更改|不存在|没有这个生活指令/.test(said)) await reply(ev, '诶 那条我改不了');
+}
+/**
+ * [喇叭:要说的话]：主人让她用电脑喇叭说句话。走 speakOnPc（百炼合成她自己的声音），合成失败只记日志，不拿系统语音顶；
+ * 要开着喇叭和语音、只听电脑主人的私聊、夜里和她歇着时不出声；一天最多 SPEAKER_ASK_MAX_DAY 句（跟打招呼的分开算）。
+ */
+async function speakAsked(ev, isGroup, raw) {
+  // 说不了的都记日志、再用她的口气补一句（她回复里可能已经答应“好 我喊”了），不拿系统语音顶
+  const no = async (why, line) => {
+    log(`大白话喇叭：${why}`);
+    await reply(ev, line);
+  };
+  const text = speakable(raw).slice(0, 100);
+  if (!text) return void (await no('没有要说的话', '要我喊啥来着'));
+  if (!cfg.speaker || !cfg.voice) return void (await no('没开喇叭或者语音，不说', '电脑喇叭现在用不了 就在这跟你说吧'));
+  if (isGroup || String(ev.user_id) !== pcOwner()) return void (await no(`${ev.user_id} 不是电脑的主人${isGroup ? '（在群里）' : ''}，不说`, '电脑喇叭只听主人的 喊不了'));
+  if (pcQuiet()) return void (await no('夜里 / 她在歇着，喇叭不出声', '这会儿喇叭不出声 明天再喊'));
+  const sp = ((state._pc ||= { song: '', plays: {}, said: {} }).speak ||= {});
+  if (sp.askDay !== dayKey()) Object.assign(sp, { askDay: dayKey(), asked: 0 });
+  if (sp.asked >= cfg.speakerAskMaxDay) return void (await no(`今天已经说了 ${sp.asked} 句，不说了`, '今天喇叭喊太多了 歇会儿'));
+  try {
+    if (!(await speakOnPc(text))) return void (await no('没说成（语音没配好）', '喇叭那边没出声 没喊成'));
+    sp.asked += 1;
+    saveState();
+    log(`电脑喇叭（对方让说的）→ ${text.slice(0, 40)}`);
+  } catch (err) {
+    log(`电脑喇叭没说成（合成失败，不拿系统语音顶）: ${err.message}`);
+    await reply(ev, '喇叭那边卡了 没喊出来');
+  }
+}
+const LIFE_SWITCH_RE = /^(?:主动 (?:开|关)|暂停|恢复|停用|启用|兴趣 (?:plant|notes|sketch|rest) \d+(?:\.\d+)?)$/;
+/** 回完话以后去办标记里的事。快的（提醒、城市、生日）等着办完；写信、寄明信片、发说说要好一会儿，不占着这个聊天。 */
+async function runNatural(ev, acts, { chatKey, isGroup, gaveCard = false }) {
+  let pics = 0;
+  for (const a of acts) {
+    try {
+      if (a.kind === '提醒') {
+        const r = parseRemind(a.body);
+        if (!r) {
+          log(`大白话提醒：看不懂「${a.body.slice(0, 40)}」（时间不对或者已经过了），没设`);
+          await reply(ev, pick(['诶 这个时间我没看明白 你再说下几点？', '几点来着 我没整明白 再说一遍']));
+        } else {
+          addReminder(ev.user_id, r.at, r.text);
+          log(`大白话提醒：${ev.user_id} ${whenDesc(r.at)} ${r.text}`);
+        }
+      } else if (a.kind === '城市') {
+        const c = cityName(a.body);
+        if (!c) continue;
+        try {
+          await saveCity(ev.user_id, c);
+          log(`大白话城市：${ev.user_id} 在${c}`);
+        } catch (err) {
+          log(`大白话城市：没查到${c}（${err.message}）`);
+          await reply(ev, `诶 ${c}这个地方我没查到 换个写法？`);
+        }
+      } else if (a.kind === '生日') {
+        const b = parseBirthday(a.body);
+        if (!b) {
+          log(`大白话生日：看不懂「${a.body.slice(0, 20)}」，没记`);
+          await reply(ev, '你这生日我没看懂 几月几号来着？');
+        } else {
+          userState(ev.user_id).birthday = `${pad2(b[0])}-${pad2(b[1])}`;
+          saveState();
+          log(`大白话生日：${ev.user_id} ${b[0]}-${b[1]}`);
+        }
+      } else if (a.kind === '看日记') {
+        const t = journalText(chatKey);
+        if (t) await reply(ev, t, { whole: true });
+        else {
+          log('大白话日记：还没写过，没东西给看');
+          await reply(ev, '诶 我还没写过日记呢');
+        }
+      } else if (a.kind === '写信') {
+        startLetter(ev, true).catch((err) => log(`写信失败: ${err.message}`));
+      } else if (a.kind === '寄明信片') {
+        if (gaveCard) log('大白话明信片：攒着的那张这轮已经给了，不再寄');
+        else startPostcard(ev, true).catch((err) => log(`明信片失败: ${err.message}`));
+      } else if (a.kind === '发说说') {
+        startQzone(ev, true).catch((err) => log(`QQ 空间没发成: ${err.message}`));
+      } else if (a.kind === '学说话') {
+        const p = isGroup || !cfg.mimic ? null : pendingForward.get(chatKey);
+        const who = p && Date.now() - p.at <= 15 * 60_000 ? parsePick(a.body, p.speakers) : null;
+        if (!who) {
+          log(`大白话学说话：没选上「${a.body.slice(0, 20)}」（${p ? '对不上人' : '没有等着选人的转发'}）`);
+          await reply(ev, p && Date.now() - p.at <= 15 * 60_000 ? '没对上是哪个 你说第几个？' : '你先把聊天记录转给我');
+        } else await learnPicked(ev, chatKey, p, who, true);
+      } else if (a.kind === '别学了') {
+        const p = pendingForward.get(chatKey);
+        if (p && Date.now() - p.at <= 15 * 60_000) {
+          pendingForward.delete(chatKey); // 还在等着选人：不学了
+          log('大白话学说话：转发的那段不学了');
+        } else await stopMimic(ev, true);
+      } else if (a.kind === '记住') {
+        if (a.body) await lifeCmd(ev, chatKey, isGroup, `记住 ${a.body.slice(0, 2000)}`);
+      } else if (a.kind === '忘掉' || a.kind === '更正') {
+        const [old, ...rest] = a.body.split(/[|｜]/);
+        const fix = rest.join(' ').trim();
+        const m = cfg.chronolife && chronoAdapter ? chronoAdapter.findMemory(chatKey, old) : null;
+        if (!m || (a.kind === '更正' && !fix)) {
+          log(`大白话${a.kind}：没找到「${old.slice(0, 30)}」这条${a.kind === '更正' && !fix ? '（也没说改成啥）' : ''}`);
+          await reply(ev, !m ? '诶 我没找到你说的那条' : '改成啥来着');
+        } else await lifeCmd(ev, chatKey, isGroup, a.kind === '忘掉' ? `删除 ${m.id}` : `更正 ${m.id} ${fix.slice(0, 2000)}`);
+      } else if (a.kind === '喇叭') {
+        await speakAsked(ev, isGroup, a.body);
+      } else if (a.kind === '生活') {
+        const arg = a.body.replace(/\s+/g, ' ').replace(/^主动\s*(开|关)$/, '主动 $1');
+        if (!LIFE_SWITCH_RE.test(arg)) {
+          log(`大白话生活：「${arg.slice(0, 30)}」不是能改的开关，没办`);
+          await reply(ev, '这个我改不了');
+        } else await lifeCmd(ev, chatKey, isGroup, arg);
+      } else if (a.kind === '音乐') {
+        await musicCtrl(ev, a.body);
+      } else if (a.kind === '发图') {
+        if (++pics > 3) log('大白话发图：一轮最多发 3 张，多的不发');
+        else await sendPicAsked(ev, a.body);
+      } else if (a.kind === '画') {
+        drawAsked(ev, a.body).catch((err) => log(`画画没画成: ${err.message}`)); // 要半分钟以上，不占着这个聊天
+      }
+    } catch (err) {
+      log(`大白话[${a.kind}]没办成: ${err.message}`);
+      await reply(ev, '诶 刚答应你的那个没弄成').catch(() => {});
+    }
+  }
+}
+
 async function handleEvent(ev) {
   if (ev.self_id) selfId = ev.self_id;
   if (selfId && ev.user_id === selfId) return;
@@ -2831,6 +3384,12 @@ async function handleEvent(ev) {
     images.push(...media.images);
     text = text ? `${media.note}\n${text}` : media.note;
   }
+  const voice = await readVoice(clean, ev);
+  if (voice?.failed && !text && !images.length) {
+    await reply(ev, pick(DEAF_LINES)); // 只发了条语音、又没听成：直接让对方打字，不用过模型
+    return;
+  }
+  if (voice) text = voice.note ? (text ? `${voice.note}\n${text}` : voice.note) : `${text}\n（还发了条语音，没听清）`.trim();
   if (!text && images.length === 0) {
     if (wokeWord) {
       await reply(ev, '在');
@@ -2866,16 +3425,13 @@ async function handleEvent(ev) {
   }
   const cityCmd = text.match(/^\/城市\s*(.*)$/);
   if (cityCmd) {
-    const st = userState(ev.user_id);
     const c = cityCmd[1].trim();
     if (!c) {
       await reply(ev, cityOf(ev.user_id) ? `你在${cityOf(ev.user_id)}啊` : '你还没说你在哪 发 /城市 杭州 这样');
       return;
     }
     try {
-      const w = await getWeather(c);
-      st.city = c;
-      saveState();
+      const w = await saveCity(ev.user_id, c);
       await reply(ev, `记住了 你在${c}\n${describeWeather(w)}`, { whole: true });
     } catch (err) {
       await reply(ev, `没找到${c}这个地方 换个写法？`);
@@ -2890,71 +3446,19 @@ async function handleEvent(ev) {
     return;
   }
   if (text === '/日记') {
-    const d = journalDays().at(-1);
-    const j = d ? readJournal(d) : null;
-    const mine = j?.with?.[chatKey] ? `\n跟你：${j.with[chatKey]}` : '';
-    await reply(ev, j ? `${shortDay(d)}\n${j.day}${mine}` : '还没写过日记', { whole: true });
+    await reply(ev, journalText(chatKey) || '还没写过日记', { whole: true });
     return;
   }
   if (text === '/信' || text === '/写信') {
-    if (!cfg.letter || ev.message_type === 'group') return void (await reply(ev, cfg.letter ? '信私聊写' : '还没学会写信'));
-    if (letterRunning) return void (await reply(ev, '在写了 别催'));
-    letterRunning = true;
-    try {
-      await reply(ev, pick(['等我写写', '行 给你写一封', '写信得酝酿一下 等着']));
-      userState(ev.user_id).letterWeek = weekKey(); // 算这周的
-      saveState();
-      await writeLetter(ev.user_id, ev);
-    } catch (err) {
-      log(`写信失败: ${err.message}`);
-      await reply(ev, '没写出来 改天再写');
-    } finally {
-      letterRunning = false;
-    }
+    await startLetter(ev);
     return;
   }
   if (text === '/说说') {
-    if (!cfg.qzone || ev.message_type === 'group' || String(ev.user_id) !== String(cfg.proactiveQQ[0] || pcOwner())) return void (await reply(ev, cfg.qzone ? '这个只听主人的' : '还没开 QQ 空间'));
-    if (qzoneRunning) return void (await reply(ev, '在发了 别催'));
-    qzoneRunning = true;
-    try {
-      const r = await postQzone();
-      (state._qzone ||= {}).day = dayKey();
-      saveState();
-      await reply(ev, r.ok ? `发了：${r.text}${r.photo ? '（配了张照片）' : ''}` : `没发（${r.why}）`, { whole: true });
-    } catch (err) {
-      log(`QQ 空间没发成: ${err.message}`);
-      await reply(ev, '没发出去 QQ 空间那边不让');
-    } finally {
-      qzoneRunning = false;
-    }
+    await startQzone(ev);
     return;
   }
   if (text === '/明信片') {
-    if (!cfg.postcard || ev.message_type === 'group') return void (await reply(ev, cfg.postcard ? '明信片私聊给你' : '还没出去玩过'));
-    if (tripRunning) return void (await reply(ev, '在写了 别催'));
-    tripRunning = true;
-    try {
-      const t = state._trips || (state._trips = { history: [] });
-      const pending = String(ev.user_id) === tripTo() ? t.cur?.pending : null;
-      if (pending) {
-        t.cur.pending = null; // 周末寄的那张还没给：先给这张
-        saveState();
-        await reply(ev, `早给你寄了 从${t.cur.city}寄的`);
-        return void (await givePostcard(ev, pending, t.cur));
-      }
-      await reply(ev, pick(['等我找张明信片', '行 给你寄一张', '我想想从哪寄']));
-      const trip = t.cur && !t.cur.sent ? t.cur : { ...pickPlace(), planned: dayKey(), until: dayKey(), sent: false };
-      if (t.cur && t.cur !== trip) t.history = [...t.history, { city: t.cur.city, spot: t.cur.spot, planned: t.cur.planned }].slice(-12);
-      t.cur = trip; // 这周已经说好要去的就寄那儿的，没有就现去一趟
-      saveState();
-      await sendPostcard(ev.user_id, trip, ev);
-    } catch (err) {
-      log(`明信片失败: ${err.message}`);
-      await reply(ev, '没寄出来 改天再寄');
-    } finally {
-      tripRunning = false;
-    }
+    await startPostcard(ev);
     return;
   }
   if (text === '/学说话') {
@@ -2987,7 +3491,7 @@ async function handleEvent(ev) {
     return;
   }
   if (text === '/help' || text === '/帮助') {
-    await reply(ev, `直接说事就行。\n/new 开新对话\n/status 看状态${cfg.radio ? '\n想听电台就说“开台，聊聊下雨天”（/电台 帮助 看玩法）' : ''}`);
+    await reply(ev, helpText(ev), { whole: true });
     return;
   }
   if (text === '/new' || text === '/reset') {
@@ -3086,9 +3590,7 @@ async function handleEvent(ev) {
     const n = Number(rm[1]);
     const unit = (rm[2] || 'm').toLowerCase();
     const isHours = unit.startsWith('h') || unit === '小时';
-    const at = Date.now() + n * (isHours ? 3600_000 : 60_000);
-    reminders.push({ qq: String(ev.user_id), at, text: rm[3].trim() });
-    saveReminders();
+    addReminder(ev.user_id, Date.now() + n * (isHours ? 3600_000 : 60_000), rm[3].trim());
     await reply(ev, `行，${n}${isHours ? '小时' : '分钟'}后叫你`);
     return;
   }
@@ -3233,16 +3735,19 @@ async function processTurn({ ev, text, images, isGroup, chatKey, who, ids, stick
       const prompt = buildPrompt(ev, text, isGroup, chatKey, ids) + imgNote;
       const tRun = Date.now();
       const known = cfg.chronolife && !chronoAdapter ? null : sessions[chatKey]?.sessionId;
+      // 权限分级：只有主人私聊用 DSH_PERMISSION_MODE（能动手机、电脑、文件）；别人私聊、群里（谁都一样）只读，只陪聊
+      const agentOpts = isOwnerChat(ev) ? {} : { permissionMode: 'read-only' };
       let result;
       try {
-        result = await runAgent(prompt, known);
+        result = await runAgent(prompt, known, agentOpts);
       } catch (err) {
-        if (!known) throw err;
-        // A persisted session can disappear (cleared DSH_HOME, profile switch).
+        // 只有会话真没了 / 坏了（清过 DSH_HOME、换过 profile）才丢掉重开；超时、起不来这些保留会话，
+        // 不整轮重跑（不然一轮超时会变成两轮、还把上下文丢了），下面统一用人设口吻回一句让对方再说一遍。
+        if (!known || !SESSION_GONE.test(err.message)) throw err;
         log(`会话 ${known} 不可用，重开: ${err.message}`);
         delete sessions[chatKey];
         saveSessions();
-        result = await runAgent(prompt, null);
+        result = await runAgent(prompt, null, agentOpts);
       }
       if (result.session) {
         sessions[chatKey] = { sessionId: result.session, updatedAt: Date.now() };
@@ -3252,7 +3757,7 @@ async function processTurn({ ev, text, images, isGroup, chatKey, who, ids, stick
       if (!answer) {
         // 模型只干活没说话：追一句，让它交代结果，别直接甩“没憋出话”。
         try {
-          const retry = await runAgent('对方还在等你回话。用一句话说下刚才的结果，别沉默。', result.session);
+          const retry = await runAgent('对方还在等你回话。用一句话说下刚才的结果，别沉默。', result.session, agentOpts);
           answer = humanize(retry.text);
         } catch (err) {
           log(`补话失败: ${err.message}`);
@@ -3278,10 +3783,14 @@ async function processTurn({ ev, text, images, isGroup, chatKey, who, ids, stick
       // [收礼物:东西名]：对方送的东西摆进她房间（画好、抠好后拍一张“摆好了”）
       const giftTag = answer.match(/\[收礼物[:：]\s*([^\]]+?)\s*\]/)?.[1] || '';
       answer = answer.replace(/\[收礼物[:：][^\]]*\]/g, '').trim() || '谢谢 我收下了';
+      // 大白话办事（[提醒:…] [城市:…] [写信] [学说话:…] [记住:…] 这些）：标记抠掉，回完这句再照斜杠命令那套去办
+      const nat = extractNatural(answer);
+      answer = nat.text || '行';
+      if (nat.acts.length) log(`大白话标记：${nat.acts.map((a) => (a.body ? `${a.kind}:${a.body.slice(0, 30)}` : a.kind)).join('、')}`);
       markStayedUp();
       log(`← ${who}: ${answer.slice(0, 80).replace(/\n/g, ' ')}${answer.length > 80 ? '…' : ''}`);
       const sungAns = extractSing(answer);
-      const spoken = extractStickers(extractVoice(sungAns.text).text).text + (sungAns.sing !== null ? `（唱了一段${sungAns.sing ? `《${sungAns.sing}》` : ''}）` : '') + (playTag && cfg.playMusic ? `（放了首歌：${playTag}）` : '') + (giftTag && cfg.photo ? `（收下了对方送的${giftTag}，摆在房间里）` : '');
+      const spoken = extractStickers(extractVoice(sungAns.text).text).text + (sungAns.sing !== null ? `（唱了一段${sungAns.sing ? `《${sungAns.sing}》` : ''}）` : '') + (playTag && cfg.playMusic ? `（放了首歌：${playTag}）` : '') + (giftTag && cfg.photo ? `（收下了对方送的${giftTag}，摆在房间里）` : '') + naturalNotes(nat.acts);
       appendMemory(chatKey, text, spoken || '（发了个表情）');
       logDay(chatKey, who, text, spoken || '（发了个表情）');
       lastAnswer.set(chatKey, { text: spoken, at: Date.now() });
@@ -3295,14 +3804,28 @@ async function processTurn({ ev, text, images, isGroup, chatKey, who, ids, stick
         at: isGroup && cfg.groupQuote && slow,
       });
       withLife(() => { if (chrono.settings().enabled) chrono.record_interaction({ id: `qq:${chatKey}:${ids?.join('-') || Date.now()}:out`, scope: chatKey, text: spoken.slice(0, 2000) || '（表情）', direction: 'out' }); });
-      if (wantPhoto && cfg.photo && !isGroup) await sendScenePhoto(ev).catch((err) => log(`现场照失败: ${err.message}`));
-      if (playTag && cfg.playMusic && !isGroup) await playSong(ev, playTag).catch((err) => log(`放歌失败: ${err.message}`));
-      if (giftTag && cfg.photo && !isGroup) receiveGift(ev, giftTag).catch((err) => log(`收礼物没成: ${err.message}`)); // 画要半分钟，不占着这个聊天
+      // 她回复里那句“你看”已经发出去了：照片没拼成、拍不了都补一句
+      if (wantPhoto) {
+        const sent = cfg.photo && !isGroup ? await sendScenePhoto(ev).catch((err) => (log(`现场照失败: ${err.message}`), false)) : false;
+        if (!sent) {
+          if (!cfg.photo || isGroup) log(`现场照：${isGroup ? '群里' : '没开现场照'}，不拍`);
+          await reply(ev, isGroup && cfg.photo ? '照片私聊发你' : pick(['诶 照片没弄好', '诶 没拍好 算了']));
+        }
+      }
+      if (playTag && cfg.playMusic && !isGroup) await playSong(ev, playTag).catch((err) => (log(`放歌失败: ${err.message}`), reply(ev, '诶 歌没放成')));
+      else if (playTag) {
+        log(`放歌：${isGroup ? '群里' : '没开放歌'}，不放`);
+        await reply(ev, cfg.playMusic ? '歌只能放主人电脑上的 群里放不了' : '我这边放不了歌');
+      }
+      if (giftTag && cfg.photo && !isGroup) receiveGift(ev, giftTag).catch((err) => (log(`收礼物没成: ${err.message}`), reply(ev, '诶 东西没摆好 回头再弄').catch(() => {}))); // 画要半分钟，不占着这个聊天
+      let gaveCard = false;
       if (giveCard && trip.pending === giveCard) {
         trip.pending = null;
         saveState();
+        gaveCard = true;
         await givePostcard(ev, giveCard, trip).catch((err) => log(`明信片没给成: ${err.message}`));
       }
+      if (nat.acts.length) await runNatural(ev, nat.acts, { chatKey, isGroup, gaveCard });
       noteAsk(ev, chatKey, text, spoken);
       if (rt.radio && cfg.radio) {
         let req = rt.radio;
@@ -3335,6 +3858,11 @@ async function processTurn({ ev, text, images, isGroup, chatKey, who, ids, stick
 // 聊天时提示词里带一段“这台电脑上”；碰上值得说的事（一首歌这周放到第 3 遍、凌晨还在打游戏 / 还在电脑前、电脑连开好几天），
 // 偶尔主动说一句：一天最多 PC_MAX_DAY 句、两句至少隔 90 分钟、同一件事隔几天才再提，对方正在跟她聊的时候不插话。
 const pcOwner = () => String(cfg.pcOwner || cfg.proactiveQQ[0] || '');
+/**
+ * 谁是主人：统一按电脑的主人算（PC_OWNER，没填就 PROACTIVE_QQ 第一个；都没填就没有主人，谁都按“别人”算）。
+ * 主人私聊才用 DSH_PERMISSION_MODE 的全权限、才能让她动手机 / 电脑 / 文件、放歌、发图、画画；群里就算是主人也只陪聊。
+ */
+const isOwnerChat = (ev) => ev?.message_type !== 'group' && !!pcOwner() && String(ev?.user_id) === pcOwner();
 let pcNow = null; // 最近一次看到的电脑（只在内存里，不落盘）
 let pcRunning = false;
 function spanDesc(ms) {
@@ -3576,44 +4104,173 @@ function drawerSync() {
 // 电脑的主人在电脑前（键盘鼠标 5 分钟内动过）就在电脑上的 QQ 音乐里直接放（qqmusic.mjs）；不在电脑前、或者是别人点的，发 QQ 音乐的链接。
 // 只在私聊里放，一天最多 PLAY_MUSIC_MAX_DAY 首。测试用 QQMUSIC_SEARCH_FILE / PLAY_MUSIC_LOG 代替联网搜歌、真的放。
 const MUSIC_ASK = /歌|音乐|bgm|听点|听首|放首|放一首|放个/i;
+const MUSIC_CTRL_ASK = /暂停|别放了|停一下|先停|停了吧|关了吧|关掉|小声|大声|声音|音量|太吵|吵死|切歌|切一首|下一首|上一首|换一首|换首|继续放|接着放/;
+const MUSIC_PLAY_ASK = /放(?:首|一首|个|点|歌)|播放|听点歌|听首歌/;
 function musicHint(qq, text, isGroup) {
-  if (!cfg.playMusic || isGroup || String(qq) !== pcOwner()) return '';
+  if (!cfg.playMusic) return '';
+  if (isGroup || String(qq) !== pcOwner()) {
+    // 不是主人（或者在群里）：放歌、控制音乐都只能弄主人电脑上的，让她直接说
+    return MUSIC_PLAY_ASK.test(text) || MUSIC_CTRL_ASK.test(text) ? '\n（放歌、暂停、切歌、调音量这些只能在主人的电脑上弄，只听主人私聊的：对方让你放歌或者控制音乐，就说只能放主人电脑上的，别写 [放歌] [音乐] 这种标记。）' : '';
+  }
   const h = new Date().getHours();
-  if (!MUSIC_ASK.test(text) && !(h >= 22 || h < 2)) return '';
-  return '\n（你能用对方电脑上的 QQ 音乐放歌：对方让你放首歌、或者你想给对方放一首（比如夜里放首睡前听的），就在回复最后加 [放歌:歌名 歌手]，对方在电脑前就直接在 QQ 音乐里放，不在就发个链接；不想放就不加，别老放。）';
+  const ctrl = MUSIC_CTRL_ASK.test(text);
+  if (!MUSIC_ASK.test(text) && !ctrl && !(h >= 22 || h < 2)) return '';
+  return '\n（你能用对方电脑上的 QQ 音乐放歌：对方让你放首歌、或者你想给对方放一首（比如夜里放首睡前听的），就在回复最后加 [放歌:歌名 歌手]，对方在电脑前就直接在 QQ 音乐里放，不在就发个链接；不想放就不加，别老放。）' +
+    '\n（对方让你暂停、接着放、切歌、调音量（“别放了”“小声点”“切一首”“上一首”）：写 [音乐:暂停] / [音乐:继续] / [音乐:下一首] / [音乐:上一首] / [音乐:大声] / [音乐:小声]，会按这台电脑的媒体键；只在对方要的时候写。）';
 }
 async function playSong(ev, query) {
   const day = state._music?.day === dayKey() ? state._music : (state._music = { day: dayKey(), count: 0 });
-  if (day.count >= cfg.playMusicMaxDay) return log('放歌：今天放够了');
+  if (day.count >= cfg.playMusicMaxDay) {
+    log('放歌：今天放够了');
+    return void (await reply(ev, pick(['今天放好几首了 歇会儿耳朵', '今天放够了 明天再给你放'])));
+  }
   let song;
   try {
     song = pickSong(await searchSong(query, { file: env.QQMUSIC_SEARCH_FILE }), query);
   } catch (err) {
-    return log(`放歌：没搜成（${err.message}）`);
+    log(`放歌：没搜成（${err.message}）`);
+    return void (await reply(ev, pick(['音乐那边搜不了 等会再放', 'QQ 音乐抽风了 搜不出来'])));
   }
   if (!song) return void (await reply(ev, pick(['QQ 音乐上没搜到这首', '这首没搜到 换一首？'])));
   day.count++;
   saveState();
   const label = `${song.name} - ${song.singer}`;
   const snap = String(ev.user_id) === pcOwner() ? await pcSnapshot().catch(() => null) : null;
-  if (snap && snap.idleSec < 300 && playInClient(song, { exe: cfg.qqMusicExe, dir: path.join(DATA_DIR, 'music'), log: env.PLAY_MUSIC_LOG })) {
-    log(`放歌：在电脑上的 QQ 音乐放《${label}》`);
-    if (!env.PLAY_MUSIC_LOG) setTimeout(() => checkPlaying(song).catch(() => {}), 25_000);
-    return;
+  if (snap && snap.idleSec < 300) {
+    // 点 QQ 音乐界面放，系统媒体控制里看到在放这首才算；没放起来就跟不在电脑前一样发链接
+    const r = await playInClient(song, { exe: cfg.qqMusicExe, dir: path.join(DATA_DIR, 'music'), log: env.PLAY_MUSIC_LOG }).catch((err) => ({ ok: false, why: err.message }));
+    if (r.ok) return log(`放歌：在电脑上的 QQ 音乐放起来了《${label}》`);
+    log(`放歌：QQ 音乐没放起来（${r.why}），改发链接`);
   }
   await sleep((600 + Math.random() * 900) * pace());
   await reply(ev, `${label}\n${songUrl(song.mid)}`);
   log(`放歌：发了《${label}》的链接`);
 }
-/** 放了 25 秒后看一眼：QQ 音乐压根没起来，就改成在浏览器里打开网页版这首歌。 */
-async function checkPlaying(song) {
-  const snap = await pcSnapshot();
-  const name = song.name.replace(/\s*[（(].*$/, '');
-  if (snap.music?.app === 'QQ音乐' && snap.music.title.includes(name)) return log('放歌：QQ 音乐已经在放了');
-  const running = /QQMusic\.exe/i.test(execFileSync('tasklist', ['/FI', 'IMAGENAME eq QQMusic.exe', '/NH'], { encoding: 'utf8', windowsHide: true, timeout: 15_000 }));
-  if (running) return log('放歌：QQ 音乐开着，但没看到在放这首（可能缩在托盘里）');
-  openSongPage(song);
-  log('放歌：QQ 音乐没起来，改成在浏览器里打开网页版');
+
+// ── 音乐控制（跟着 PLAY_MUSIC）：主人说“暂停 / 别放了 / 小声点 / 切歌”，她写 [音乐:暂停|继续|下一首|上一首|大声|小声] ──────
+// 按这台电脑的媒体键（PowerShell 调 keybd_event：VK_MEDIA_PLAY_PAUSE / NEXT / PREV、VK_VOLUME_UP / DOWN），不用管理员、不关进程；
+// 暂停 / 继续 是同一个键，先看一眼系统媒体控制里 QQ 音乐是不是已经停了 / 在放，免得按反。只听主人私聊的。
+// 测试用 MUSIC_CTRL_LOG 记下要按的键，不真按。
+const MEDIA_KEYS = { 暂停: [0xb3, 1], 继续: [0xb3, 1], 下一首: [0xb0, 1], 上一首: [0xb1, 1], 大声: [0xaf, 5], 小声: [0xae, 5] }; // 音量一下 2%，按 5 下
+const MEDIA_ALIAS = { 停: '暂停', 停止: '暂停', 别放了: '暂停', 播放: '继续', 接着放: '继续', 切歌: '下一首', 下一曲: '下一首', 换一首: '下一首', 上一曲: '上一首', 大点: '大声', 大点声: '大声', 调大: '大声', 小点: '小声', 小点声: '小声', 调小: '小声' };
+function pressMediaKey(vk, times) {
+  const script = `Add-Type -Namespace W -Name K -MemberDefinition '[DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte scan, uint flags, System.UIntPtr extra);'
+for ($i = 0; $i -lt ${times}; $i++) { [W.K]::keybd_event(${vk}, 0, 1, [System.UIntPtr]::Zero); [W.K]::keybd_event(${vk}, 0, 3, [System.UIntPtr]::Zero); Start-Sleep -Milliseconds 60 }`;
+  return new Promise((resolve, reject) => {
+    const p = spawn('powershell', ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')], { windowsHide: true, stdio: 'ignore' });
+    const timer = setTimeout(() => p.kill(), 20_000);
+    p.on('error', (err) => (clearTimeout(timer), reject(err)));
+    p.on('close', (code) => (clearTimeout(timer), code === 0 ? resolve() : reject(new Error(`PowerShell 退出码 ${code}`))));
+  });
+}
+async function musicCtrl(ev, raw) {
+  const body = String(raw || '').replace(/\s+/g, '');
+  const act = MEDIA_KEYS[body] ? body : MEDIA_ALIAS[body] || '';
+  const no = async (why, line) => {
+    log(`大白话音乐：${why}`);
+    await reply(ev, line);
+  };
+  if (!cfg.playMusic) return void (await no('没开放歌，不按', '电脑上的歌我现在管不了'));
+  if (!isOwnerChat(ev)) return void (await no(`${ev.user_id} 不是主人或者在群里，不按`, '这个只能弄主人电脑上的'));
+  if (!act) return void (await no(`「${body.slice(0, 10)}」不认得`, '要我暂停还是切歌？'));
+  if (env.MUSIC_CTRL_LOG) {
+    fs.appendFileSync(env.MUSIC_CTRL_LOG, `${act}\n`);
+    return void log(`音乐控制：${act}（只记下来，没真按）`);
+  }
+  if (act === '暂停' || act === '继续') {
+    const np = await nowPlaying().catch(() => null); // 拿不到就照按
+    if (np && (act === '暂停') === (np.status !== 'Playing')) return void log(`音乐控制：本来就${act === '暂停' ? '停着' : '在放'}，不按`);
+  }
+  try {
+    await pressMediaKey(...MEDIA_KEYS[act]);
+    log(`音乐控制：按了${act}`);
+  } catch (err) {
+    await no(`没按上（${err.message}）`, '电脑那边没按上 你自己点一下？');
+  }
+}
+
+// ── 发图：她截了图（手机截图、看直播的截图、现场照…）想给主人看，写 [发图:路径] ─────────────────────
+// 只发 data 下她自己弄出来的图（PIC_DIRS），路径解开真实路径后还得在这几个文件夹里面（防 ../ 越界、防链接），要是真有的图片文件、10MB 以内；
+// 只在主人私聊里能用（群里、别人私聊都不发，截图可能有主人的隐私）；一轮最多 3 张。发不了就说一句。
+const PIC_DIRS = ['shots', 'live', 'scene', 'bili\\frames', 'letters', 'postcards', 'drawings'];
+const PIC_EXT = /\.(png|jpe?g|gif|webp|bmp)$/i;
+/** 能发就返回真实路径，不能发返回 { why }。 */
+function picAllowed(raw) {
+  const p0 = String(raw || '').trim().replace(/^["'“”‘’]+|["'“”‘’]+$/g, '');
+  if (!p0) return { why: '没写路径' };
+  if (p0.split(/[\\/]+/).includes('..')) return { why: '路径里有 ..' };
+  const tries = path.isAbsolute(p0) ? [p0] : [path.resolve(cfg.agentCwd, p0), path.resolve(ROOT, p0), path.resolve(DATA_DIR, p0)];
+  const found = tries.find((f) => fs.existsSync(f));
+  if (!found) return { why: '没有这个文件' };
+  let real;
+  try {
+    real = fs.realpathSync(found);
+  } catch {
+    return { why: '路径解不开' };
+  }
+  const inside = PIC_DIRS.map((d) => path.join(DATA_DIR, d)).concat(env.SCENE_DIR ? [path.resolve(env.SCENE_DIR)] : []).some((dir) => {
+    let base;
+    try {
+      base = fs.realpathSync(dir);
+    } catch {
+      return false;
+    }
+    const rel = path.relative(base, real);
+    return !!rel && !rel.startsWith('..') && !path.isAbsolute(rel);
+  });
+  if (!inside) return { why: '不在能发的文件夹里' };
+  const st = fs.statSync(real);
+  if (!st.isFile() || !PIC_EXT.test(real)) return { why: '不是图片' };
+  if (st.size > 10 * 1048576) return { why: '太大' };
+  return { file: real };
+}
+async function sendPicAsked(ev, raw) {
+  if (!isOwnerChat(ev)) {
+    log(`大白话发图：${ev.user_id} 不是主人或者在群里，不发`);
+    return void (await reply(ev, '图只能私聊发给主人'));
+  }
+  const r = picAllowed(raw);
+  if (!r.file) {
+    log(`大白话发图：没发「${String(raw).slice(0, 80)}」（${r.why}）`);
+    return void (await reply(ev, r.why === '没有这个文件' ? '诶 那张图我找不着了' : '那张图发不了'));
+  }
+  await sleep((600 + Math.random() * 800) * pace());
+  await sendMsg(ev, [{ type: 'image', data: { file: 'base64://' + fs.readFileSync(r.file).toString('base64') } }]);
+  log(`大白话发图：发了 ${path.basename(r.file)}`);
+}
+
+// ── 画画（DRAW，主人专用）：主人让她画，她写 [画:描述]，用百炼通义万相（imagegen.mjs）画一张发回 QQ ─────────────
+// 一天最多 DRAW_MAX_DAY 张（默认 3，先记上，画失败退回去）；没有 DASHSCOPE_API_KEY 就说画不了。存 data/drawings/（留最近 30 张）。
+// 测试用 DRAW_FAKE_FILE 代替真去画。
+const DRAW_DIR = path.join(DATA_DIR, 'drawings');
+async function drawAsked(ev, raw) {
+  const desc = String(raw || '').replace(/\s+/g, ' ').trim().slice(0, 300);
+  const no = async (why, line) => {
+    log(`画画：${why}`);
+    await reply(ev, line);
+  };
+  if (!cfg.draw) return void (await no('没开', '我还不会画画'));
+  if (!isOwnerChat(ev)) return void (await no(`${ev.user_id} 不是主人或者在群里，不画`, '画画只给主人画'));
+  if (!desc) return void (await no('没说画啥', '画啥 说具体点'));
+  if (!env.DASHSCOPE_API_KEY) return void (await no('没有 DASHSCOPE_API_KEY', '我这边画不了 画图的没配好'));
+  const day = state._draw?.day === dayKey() ? state._draw : (state._draw = { day: dayKey(), count: 0 });
+  if (day.count >= cfg.drawMaxDay) return void (await no(`今天已经画了 ${day.count} 张`, '今天画好几张了 手酸 明天再画'));
+  day.count++;
+  saveState();
+  fs.mkdirSync(DRAW_DIR, { recursive: true });
+  const out = path.join(DRAW_DIR, `${Date.now()}.png`);
+  try {
+    if (env.DRAW_FAKE_FILE) fs.copyFileSync(env.DRAW_FAKE_FILE, out);
+    else await genImage(out, { prompt: desc, negative: '文字，水印，签名，模糊，畸形', size: '1024*1024', model: cfg.drawModel, apiKey: env.DASHSCOPE_API_KEY });
+    for (const f of fs.readdirSync(DRAW_DIR).filter((x) => x.endsWith('.png')).sort().slice(0, -30)) fs.rmSync(path.join(DRAW_DIR, f), { force: true });
+    await sendMsg(ev, [{ type: 'image', data: { file: 'base64://' + fs.readFileSync(out).toString('base64') } }]);
+    drawerPut('画', path.basename(out), out);
+    log(`画画：画好发了（${desc.slice(0, 30)}）`);
+  } catch (err) {
+    day.count = Math.max(0, day.count - 1); // 没画成不算
+    saveState();
+    await no(`没画成（${err.message}）`, '没画出来 等会再试试');
+  }
 }
 
 // ── 做梦：早上醒来有时记得昨晚的梦（最近的事打乱了拼的），今天第一次聊天、或者早安时顺口说一句 ─────────────
@@ -4256,7 +4913,7 @@ if (cfg.chronolife) {
 }
 
 // 提醒每 30 秒查一次；主动找人每 5 分钟看一眼（受时段/频率限制）。
-setInterval(checkReminders, 30_000);
+setInterval(checkReminders, cfg.reminderCheckMs);
 if (cfg.proactive && cfg.followup && cfg.facts) {
   log(`回访: 每 ${Math.round(cfg.followupCheckMs / 1000)}s 看一眼，${cfg.followupHours.join('-')} 点之间`);
   setInterval(checkFollowups, cfg.followupCheckMs);
@@ -4325,6 +4982,11 @@ if (cfg.speaker || cfg.notes) {
 if (cfg.drawer) {
   log(`桌面抽屉: ${drawerDir()}`);
   drawerSync();
+}
+if (cfg.sing) {
+  // 学歌的后台进程由 bridge 来起：DSH 起的进程一轮结束会被它收掉（见 sing/learn.mjs）
+  log('学歌: learn.mjs start 排队的任务由这里接手，在后台跑完');
+  watchLearnJobs(log);
 }
 if (cfg.playMusic) log(`放歌: [放歌:歌名 歌手] → ${fs.existsSync(cfg.qqMusicExe) ? '主人在电脑前就用 QQ 音乐放' : '没找到 QQ 音乐，只发链接'}，不在电脑前发链接（一天最多 ${cfg.playMusicMaxDay} 首）`);
 if (cfg.journal) {

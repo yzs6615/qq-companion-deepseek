@@ -7,8 +7,8 @@
  *   node agent-bridge/bili/bili.mjs rank [条数]                 全站排行
  *   node agent-bridge/bili/bili.mjs search 关键词 [--n 8] [--order click|pubdate]
  *   node agent-bridge/bili/bili.mjs watch BV号或链接 [--listen 3] [--frames]
- *        看一个视频：简介、标签、字幕（登录才有）、弹幕刷得最多的、热评；
- *        --listen N：没字幕时下载音轨用本地 Whisper 听前 N 分钟（慢，十几秒到一分钟）
+ *        看一个视频：简介、标签、字幕（登录才有）、弹幕刷得最多的、热评；b23.tv 短链也认（自己跟一次跳转）
+ *        --listen N：没字幕时下载音轨用本地 Whisper 听前 N 分钟（最多 3 分钟，慢，十几秒到一分钟；只用本地模型，没有就说没听成）
  *        --frames [N]：挑弹幕最密的时刻 + 换镜头的地方 + 均匀铺开截图，去掉重复镜头，
  *          每 9 格拼一张（不写 N 就按时长：≤3 分钟 9 帧，≤10 分钟 18，再长 27），再用 read_image 看
  *   node agent-bridge/bili/bili.mjs seen [条数]                 最近看过的
@@ -20,7 +20,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { strip, parseDanmaku, topDanmaku, autoFrames, danmakuPeaks, parseSidx } from './lib.mjs';
+import { strip, parseDanmaku, topDanmaku, autoFrames, danmakuPeaks, parseSidx, parseVideoRef, resolveVideoRef } from './lib.mjs';
 
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const { env } = await import('../config.mjs');
@@ -31,6 +31,7 @@ const COOLDOWN = path.join(DATA, 'cooldown');
 const API = env.BILI_API || 'https://api.bilibili.com';
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36';
 const SESSDATA = (env.BILIBILI_SESSDATA || '').trim();
+const MAX_LISTEN_MIN = 3;
 
 fs.mkdirSync(DATA, { recursive: true });
 const readJson = (f, d) => {
@@ -162,7 +163,7 @@ async function search(keyword, n = 8, order = 'totalrank') {
 async function listen(bvid, cid, minutes) {
   const pu = await get('/x/player/wbi/playurl?' + wbi({ bvid, cid, fnval: 16, fourk: 0 }));
   const audio = (pu.dash?.audio || []).sort((a, b) => a.bandwidth - b.bandwidth)[0];
-  if (!audio) return '';
+  if (!audio) return { text: '', error: '这个视频没有单独的音轨' };
   const bytes = Math.ceil((audio.bandwidth / 8) * minutes * 60 * 1.1) + 200_000;
   const buf = await raw(audio.baseUrl || audio.base_url, { binary: true, range: `bytes=0-${bytes}` });
   const file = path.join(DATA, `listen-${bvid}.m4a`);
@@ -175,11 +176,14 @@ async function listen(bvid, cid, minutes) {
       env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
     });
     const last = (py.stdout || '').trim().split(/\r?\n/).pop() || '';
+    let res;
     try {
-      return JSON.parse(last).text || '';
+      res = JSON.parse(last);
     } catch {
-      return '';
+      return { text: '', error: py.error ? py.error.message : '识别脚本没给结果' };
     }
+    // 没本地模型这类问题 phone_live.py 会写在 error 里（不会去网上下模型）
+    return { text: res.text || '', error: res.error || '' };
   } finally {
     fs.rmSync(file, { force: true });
   }
@@ -282,9 +286,17 @@ async function frames(bvid, cid, n, duration, dm) {
 }
 
 async function watch(target, listenMin = 0, frameCount = 0) {
-  const bvid = (String(target || '').match(/BV[0-9A-Za-z]{10}/) || [])[0];
-  if (!bvid) throw new Error('看哪个？watch 后面跟 BV 号或链接');
-  const v = await get('/x/web-interface/wbi/view?' + wbi({ bvid }));
+  if (!parseVideoRef(target)) throw new Error('看哪个？watch 后面跟 BV 号或链接（b23.tv 短链也行）');
+  // b23.tv 短链：自己跟一次跳转拿到 BV 号
+  let ref;
+  try {
+    ref = await resolveVideoRef(target);
+  } catch (err) {
+    throw new Error(`短链打不开：${err.message}`);
+  }
+  if (!ref) throw new Error('这个短链跳过去不是视频，换个 BV 号或完整链接');
+  const v = await get('/x/web-interface/wbi/view?' + wbi(ref.bvid ? { bvid: ref.bvid } : { aid: ref.aid }));
+  const bvid = v.bvid || ref.bvid;
   const lines = [];
   lines.push(`【${strip(v.title)}】`);
   lines.push([`UP ${v.owner?.name}`, `播放 ${num(v.stat.view)}`, `弹幕 ${num(v.stat.danmaku)}`, `点赞 ${num(v.stat.like)}`, `投币 ${num(v.stat.coin)}`, `时长 ${dur(v.duration)}`, date(v.pubdate), v.tname].filter(Boolean).join(' · '));
@@ -316,11 +328,16 @@ async function watch(target, listenMin = 0, frameCount = 0) {
   } catch (err) {
     if (err instanceof RiskControl) throw err;
   }
+  let heardErr = '';
   if (!words && listenMin > 0) {
-    words = await listen(bvid, v.cid, listenMin);
+    const heard = await listen(bvid, v.cid, listenMin);
+    words = heard.text;
+    heardErr = heard.error;
     wordsFrom = `听了前 ${listenMin} 分钟`;
   }
   if (words) lines.push(`${wordsFrom}：${words.slice(0, 2500)}${words.length > 2500 ? '…' : ''}`);
+  else if (heardErr) lines.push(`（没听成：${heardErr}）`);
+  else if (listenMin > 0) lines.push(`（听了前 ${listenMin} 分钟，没听出有人说话）`);
   else lines.push(SESSDATA ? '（这个视频没字幕；想知道讲了啥可以加 --listen 3 听一下）' : '（没登录看不到字幕；想知道讲了啥可以加 --listen 3 听一下）');
   let dm = [];
   try {
@@ -399,7 +416,11 @@ try {
     const fi = rest.indexOf('--frames');
     const fn = fi >= 0 ? Number(rest[fi + 1]) : 0;
     const frameCount = fi < 0 ? 0 : fn > 0 ? Math.min(27, fn) : 'auto';
-    await watch(positional[0], Math.min(10, Number(opt('--listen', 0)) || 0), frameCount);
+    // --listen 最多听前 3 分钟：下载 + 本地识别差不多一分来钟，跟看直播一次最多 90 秒一个意思，再长这轮聊天就等太久了
+    const want = Number(opt('--listen', 0)) || 0;
+    const listenMin = Math.min(MAX_LISTEN_MIN, Math.max(0, want));
+    if (want > MAX_LISTEN_MIN) console.log(`（一次最多听前 ${MAX_LISTEN_MIN} 分钟，--listen ${want} 按 ${MAX_LISTEN_MIN} 算）`);
+    await watch(positional.join(' '), listenMin, frameCount);
   }
 } catch (err) {
   if (err instanceof RiskControl) {

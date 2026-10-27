@@ -157,6 +157,7 @@ export const cfg = {
   awayMin: Number(env.AWAY_MIN ?? 120), // 键盘鼠标这么久没动、又动了，算“回来了”
   speaker: (env.SPEAKER || 'false') === 'true', // 早上第一次开电脑、离开很久又回来时，用她的声音从电脑喇叭说一句（要开语音）
   speakerMaxDay: Number(env.SPEAKER_MAX_DAY ?? 3),
+  speakerAskMaxDay: Number(env.SPEAKER_ASK_MAX_DAY ?? 10), // 主人让她“用喇叭说句话”的，一天最多几句（跟自己打招呼的分开算，不用隔一小时）
   notes: (env.NOTES || 'false') === 'true', // 离开电脑好几个小时时，她在桌面留张便条，回来时弹个通知
   noteAfterMin: Number(env.NOTE_AFTER_MIN ?? 180),
   drawer: (env.DRAWER || 'false') === 'true', // 桌面上“<名字>的抽屉”：写给主人的信、明信片、现场照、梦、便条、收藏的视频都放一份
@@ -191,9 +192,15 @@ export const cfg = {
   anniversary: (env.ANNIVERSARY || 'true') !== 'false', // 认识 100 天、生日这种日子
   meetDate: env.MEET_DATE || '', // 手动指定认识的日子：qq:2025-05-15，多个用逗号；不填就用第一次聊天那天
   weather: (env.WEATHER || 'true') !== 'false', // 对方那边的天气（Open-Meteo，免费不要 key）
-  weatherCity: env.WEATHER_CITY || '', // 默认城市；每个人也可以在 QQ 里发 /城市 杭州
+  weatherCity: env.WEATHER_CITY || '', // 默认城市；每个人也可以跟她说“我在杭州”（或者发 /城市 杭州）
+  reminderCheckMs: Number(env.REMINDER_CHECK_MS ?? 30_000), // 多久看一眼有没有到点的提醒（测试里调短）
   media: (env.MEDIA || 'true') !== 'false', // 看懂发来的视频（抽帧 + 听）和文件
   mediaMaxMB: Number(env.MEDIA_MAX_MB ?? 60),
+  hearVoice: (env.HEAR_VOICE || 'true') !== 'false', // 听对方发来的 QQ 语音：本地 Whisper 转成字（只用本地模型，不联网），没模型 / 没听清就让对方打字
+  // 画画：主人私聊让她画，模型写 [画:描述]，用百炼通义万相画一张发回 QQ（要 DASHSCOPE_API_KEY，没有就跟主人说画不了）
+  draw: (env.DRAW || 'true') !== 'false',
+  drawMaxDay: Number(env.DRAW_MAX_DAY ?? 3), // 一天最多画几张（一张一两毛）
+  drawModel: env.DRAW_IMAGE_MODEL || env.LETTER_IMAGE_MODEL || 'wanx2.1-t2i-turbo',
   journal: (env.JOURNAL || 'true') !== 'false', // 每天写日记，当长期上下文
   journalHour: Number(env.JOURNAL_HOUR ?? 23), // 几点后写当天的日记（没写成第二天补）
   journalDays: Number(env.JOURNAL_DAYS ?? 7), // 聊天时带最近几天的日记

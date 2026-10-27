@@ -24,7 +24,8 @@ python live\live.py shot
 python live\live.py rec 30
 ```
 
-- 用 Edge 打开直播间并最大化
+- 单独开一个 Edge 窗口（临时配置，不碰你自己开着的 Edge）打开直播间并最大化，看完把这个窗口关掉
+- Edge 先找 Program Files，再找 x86、用户目录、注册表
 - 声音：系统 loopback（`soundcard`），不用麦克风
 - 输出同上，目录 `data/live/<时间戳>/`
 
@@ -32,9 +33,11 @@ python live\live.py rec 30
 
 `tools/whisper-models/base/`（约 138MB，已从 ModelScope 下载）。
 换 small：`node scripts/fetch-whisper.mjs small`，然后 `--model small`（更准、更慢）。
+只用本地模型（`local_files_only`），找不到 `<大小>/model.bin` 就报中文错误，不会去网上下；模型放别处就设 `WHISPER_MODEL_DIR`。
 
 ## 注意
 
+- 一次最多看/录 90 秒，`--seconds` 写多了会截到 90。
 - 这些命令要在**桌面**跑：沙箱里 adb daemon 起不来（`CreatePipe failed`），
   soundcard 也需要真实会话。
 - 手机外放录音受音量/环境噪音影响，识别率不如内录；要更清楚可以手机投屏到电脑

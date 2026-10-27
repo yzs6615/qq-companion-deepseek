@@ -16,11 +16,15 @@
  *   node phone/phone.mjs info
  *
  * Env: ADB=<path to adb>, ANDROID_SERIAL=<serial>, PHONE_SHOT_DIR=<dir>
+ *
+ * 发给手机的每条命令先过 guard.mjs：打电话、发短信、卸载/装应用、清数据、改系统设置、删文件、
+ * 参数里夹 ; | & 这类字符的，一律拦下并说明原因（退出码 3）。
  */
 import { execFileSync, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { checkAdb, checkKey, checkTapText, isNum, isPackageName } from './guard.mjs';
 
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const ADB = process.env.ADB || path.join(ROOT, '..', 'tools', 'platform-tools', 'adb.exe');
@@ -53,7 +57,14 @@ function fail(msg) {
   console.error(`phone: ${msg}`);
   process.exit(1);
 }
+// 被“别做”清单拦下：原因打到 stdout（模型看得到），退出码 3，跟普通出错分开
+function refuse(why) {
+  console.log(`phone: 不执行——${why}。`);
+  process.exit(3);
+}
 function adbArgs(args, { binary = false } = {}) {
+  const why = checkAdb(args);
+  if (why) refuse(why);
   const full = [...(process.env.ANDROID_SERIAL ? ['-s', process.env.ANDROID_SERIAL] : []), ...args];
   if (DRY) {
     console.log(`${ADB} ${full.join(' ')}`);
@@ -149,6 +160,8 @@ function find(query, doTap) {
     console.log(`${n.text || n.desc}  ->  ${cx} ${cy}  (${b.x1},${b.y1})-(${b.x2},${b.y2})`);
   });
   if (doTap) {
+    const why = checkTapText(hits[0].text || hits[0].desc) || checkTapText(query);
+    if (why) refuse(why);
     const b = hits[0].bounds;
     sh(['input', 'tap', String(Math.round((b.x1 + b.x2) / 2)), String(Math.round((b.y1 + b.y2) / 2))]);
     console.log(`已点击：${hits[0].text || hits[0].desc}`);
@@ -160,6 +173,7 @@ function tap(x, y) {
   console.log(`tap ${x} ${y}`);
 }
 function swipe(x1, y1, x2, y2, ms = 300) {
+  if (![x1, y1, x2, y2, ms].every(isNum)) fail('用法: swipe x1 y1 x2 y2 [ms]（都得是数字）');
   sh(['input', 'swipe', String(x1), String(y1), String(x2), String(y2), String(ms)]);
   console.log(`swipe ${x1},${y1} -> ${x2},${y2} (${ms}ms)`);
 }
@@ -175,6 +189,7 @@ function scroll(dir = 'down', times = 1) {
 }
 function inputText(text) {
   if (!text) fail('用法: text <内容>');
+  if (/[\r\n]/.test(text)) fail('text 里不能有换行，一次输一行');
   if (/[^\x00-\x7F]/.test(text)) {
     const b64 = Buffer.from(text, 'utf8').toString('base64');
     sh(['am', 'broadcast', '-a', 'ADB_INPUT_B64', '--es', 'msg', b64]);
@@ -188,11 +203,14 @@ function inputText(text) {
 function key(name) {
   const code = KEYCODES[String(name).toUpperCase()] ?? (/^\d+$/.test(String(name)) ? Number(name) : null);
   if (!code) fail(`未知按键: ${name}（可用：${Object.keys(KEYCODES).join(', ')} 或 keycode 数字）`);
+  const why = checkKey(code);
+  if (why) refuse(why);
   sh(['input', 'keyevent', String(code)]);
   console.log(`key ${name} (${code})`);
 }
 function openApp(pkg) {
   if (!pkg) fail('用法: open <包名>');
+  if (!isPackageName(pkg)) fail(`包名不对：${pkg}（要像 com.tencent.mm 这样）`);
   let comp = '';
   try {
     comp = out(shell(`cmd package resolve-activity --brief ${pkg}`)).split('\n').pop()?.trim() || '';
@@ -267,7 +285,8 @@ function imeList() {
 }
 function setIme(which = 'adb') {
   if (which === 'adb') sh(['ime', 'set', 'com.android.adbkeyboard/.AdbIME']);
-  else sh(['ime', 'set', which]);
+  else if (/^[A-Za-z0-9_.]+\/[A-Za-z0-9_.$]+$/.test(which)) sh(['ime', 'set', which]);
+  else fail(`输入法 id 不对：${which}（先 ime 看列表）`);
   console.log('done');
 }
 function installIme() {

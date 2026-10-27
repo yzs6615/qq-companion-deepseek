@@ -41,6 +41,29 @@ export class LifeAdapter {
     }
     this.clearSession(scope);
   }
+  /**
+   * 大白话说“忘掉…”“记错了…”时按内容找那一条：只找这个聊天里能改的（不找聊天流水、不找她自己的经历），
+   * 先找原文里带着这几个字的（让记住的、记得的事优先），找不到再按两个字两个字比，最像的那条要对上六成以上。
+   */
+  findMemory(scope, text) {
+    const q = String(text || '').trim();
+    if (!q) return null;
+    const ok = m => m.scope === scope && m.deletable && !m.id.startsWith('qq:');
+    const rank = m => (m.id.startsWith('note:') || m.id.startsWith('fact:') ? 0 : 1);
+    const hit = this.engine.get_relevant_memories({ scope, query: q, limit: 100 }).filter(ok).sort((a, b) => rank(a) - rank(b));
+    if (hit.length) return hit[0];
+    const grams = s => { const t = String(s).replace(/[\s，。,.!！?？、“”"']/g, ''); return new Set(Array.from({ length: Math.max(0, t.length - 1) }, (_, i) => t.slice(i, i + 2))); };
+    const want = grams(q);
+    let best = null, score = 0;
+    for (const m of this.engine.get_relevant_memories({ scope, limit: 100 }).filter(ok)) {
+      const have = grams(m.text);
+      let n = 0;
+      for (const g of want) if (have.has(g)) n++;
+      const s = n / Math.max(1, Math.min(want.size, have.size));
+      if (s > score || (s === score && best && rank(m) < rank(best))) [best, score] = [m, s];
+    }
+    return score >= 0.6 ? best : null;
+  }
   async command({ text, scope, userId, isGroup, send }) {
     const match = text.match(/^\/生活(?:\s+([\s\S]*))?$/);
     if (!match) return false;
