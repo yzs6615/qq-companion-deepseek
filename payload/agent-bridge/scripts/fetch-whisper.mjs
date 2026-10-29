@@ -1,52 +1,8 @@
 #!/usr/bin/env node
-/**
- * 下载 faster-whisper 模型到 tools/whisper-models/<name>/（HF 镜像）。
- * 用法：node scripts/fetch-whisper.mjs [base|small|tiny]
- */
-import fs from 'node:fs';
-import path from 'node:path';
+// 整合包：先按整合包的目录指好 COMPANION_HOME 这些（见 companion-env.mjs），再跑插件版的 packages/core/kernel/scripts/fetch-whisper.mjs
 import { fileURLToPath } from 'node:url';
+import '../companion-env.mjs';
 
-const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
-const TOOLS = path.join(ROOT, '..', 'tools');
-const MODEL = process.argv[2] || 'base';
-const BASE = `https://modelscope.cn/models/gpustack/faster-whisper-${MODEL}/resolve/master`;
-const DEST = path.join(TOOLS, 'whisper-models', MODEL);
-
-const FILES = ['config.json', 'tokenizer.json', 'vocabulary.txt', 'model.bin'];
-
-async function download(name) {
-  const dest = path.join(DEST, name);
-  if (fs.existsSync(dest) && fs.statSync(dest).size > 1000 && name !== 'model.bin') {
-    console.log(`${name}: exists`);
-    return;
-  }
-  const url = `${BASE}/${name}`;
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`${name}: HTTP ${res.status}`);
-  const total = Number(res.headers.get('content-length') || 0);
-  console.log(`${name}: ${(total / 1048576).toFixed(1)} MB`);
-  fs.mkdirSync(DEST, { recursive: true });
-  const out = fs.createWriteStream(dest);
-  const reader = res.body.getReader();
-  let got = 0;
-  let last = Date.now();
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    got += value.length;
-    out.write(Buffer.from(value));
-    if (Date.now() - last > 5000) {
-      const mb = got / 1048576;
-      console.log(`  ${mb.toFixed(1)}/${(total / 1048576).toFixed(1)} MB`);
-      last = Date.now();
-    }
-  }
-  await new Promise((r) => out.end(r));
-  console.log(`${name}: done ${(got / 1048576).toFixed(1)} MB`);
-}
-
-for (const f of FILES) {
-  await download(f);
-}
-console.log(`model dir: ${DEST}`);
+const target = new URL('../packages/core/kernel/scripts/fetch-whisper.mjs', import.meta.url);
+process.argv[1] = fileURLToPath(target); // 有的脚本看“是不是直接运行的我”才跑命令行那段
+await import(target.href);

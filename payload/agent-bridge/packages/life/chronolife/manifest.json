@@ -1,0 +1,9 @@
+{
+  "name": "chronolife",
+  "version": "0.1.0",
+  "host": "dsh-companion-life",
+  "entry": "adapter.mjs",
+  "description": "本机连续虚拟生活、分域记忆和受控主动消息",
+  "storage": "SQLite WAL",
+  "networkListener": false
+}

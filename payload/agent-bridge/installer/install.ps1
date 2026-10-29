@@ -32,7 +32,7 @@ $Features = @(
   @{ id = 'memory';    name = '记性、日记和回访'; def = $true;  mb = 0;   short = '记住聊过的事，睡前写日记';        desc = '记住聊过的事，每天睡前写日记当长期记忆；过两天自然地问一句；会学对方的口头禅' }
   @{ id = 'proactive'; name = '主动找你';         def = $true;  mb = 0;   short = '早安晚安，好久没聊会冒个泡';      desc = '早安晚安、好久没聊冒个泡；被冷落了会有点小情绪' }
   @{ id = 'autonomy';  name = '自己找事做';       def = $true;  mb = 0;   short = '没人理时自己找事干，慢慢有了喜好'; desc = '没人理它时自己找点事干，睡前回想，慢慢长出自己的喜好和性格' }
-  @{ id = 'stickers';  name = '表情包';           def = $true;  mb = 1;   short = '会发表情，还会偷你的表情包';      desc = '会发表情图、会收你发的表情包（下载一套 Twemoji 默认表情）' }
+  @{ id = 'stickers';  name = '表情包';           def = $true;  mb = 2;   short = '会发表情，还会偷你的表情包';      desc = '会发表情图、会收你发的表情包（下载一套 DeepSeek 小鲸鱼默认表情，FeWOO/DeepSeek-meme，MIT）' }
   @{ id = 'mimic';     name = '学某个人说话';     def = $true;  mb = 0;   short = '转发聊天记录，学那个人的口气';    desc = '把一段聊天记录合并转发给它，它会慢慢学那个人的说话方式' }
   @{ id = 'radio';     name = '深夜电台';         def = $true;  mb = 0;   short = '说“开台”就录一期电台节目';        desc = '说“开台”她就录一期两三分钟的语音节目，配节目卡和一首歌（没开发语音就发文字版）' }
   @{ id = 'bili';      name = '刷 B站';           def = $true;  mb = 70;  short = '刷热门，看弹幕、热评和画面';      desc = '自己刷热门、看视频的弹幕热评和画面（要允许它在电脑上执行命令；看画面要下载 Python 和图像库）' }
@@ -72,15 +72,6 @@ function Update-EnvFile([string]$path, $values) {
     }
   }
   [IO.File]::WriteAllLines($path, $lines, (New-Object Text.UTF8Encoding($false)))
-}
-# 模板：{{NAME}} 换名字；<!-- if:x --> … <!-- end --> 只保留勾了的功能（可以嵌套）
-function Expand-Template([string]$text, [string]$name, $on) {
-  $re = [regex]'(?s)<!-- if:(\w+) -->\r?\n?((?:(?!<!-- if:).)*?)<!-- end -->\r?\n?'
-  while ($re.IsMatch($text)) {
-    $text = $re.Replace($text, { param($m) if ($on -contains $m.Groups[1].Value) { $m.Groups[2].Value } else { '' } }, 1)
-  }
-  $text = [regex]::Replace($text, '(\r?\n){3,}', "`r`n`r`n")
-  return $text.Replace('{{NAME}}', $name)
 }
 function Refresh-Path {
   $env:Path = [Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' + [Environment]::GetEnvironmentVariable('Path', 'User')
@@ -298,6 +289,23 @@ function Install-All($A) {
   Set-Progress 3 '复制程序文件'
   if (Test-Path (Join-Path $payload 'agent-bridge')) {
     Copy-Item (Join-Path $payload 'agent-bridge\*') $app -Recurse -Force
+    # 从老版本升级：机器人改跑 packages\ 里的插件版了，老版本那一大套代码用不上了，删掉（只删这些文件，data、.env、persona.md 不碰）
+    $oldCode = @('human.mjs', 'config.mjs', 'tts.mjs', 'weather.mjs', 'stickers.mjs', 'pc.mjs', 'imagegen.mjs', 'qqmusic.mjs', 'radio.mjs', 'radio.patch.yml',
+      'scene\photo.py', 'scene\gift.py', 'letter\card.py', 'postcard\card.py', 'media\doc_text.py', 'life\life.mjs', 'images\gif_sheet.py',
+      'bili\bili.mjs', 'bili\lib.mjs', 'bili\frames.py', 'radio\card.py', 'phone\phone.mjs', 'phone\guard.mjs',
+      'sing\paths.py', 'sing\convert.py', 'sing\render.py', 'sing\separate.py', 'sing\finish.py', 'sing\shim\hf_utils.py',
+      'chronolife\adapter.mjs', 'chronolife\engine.mjs', 'chronolife\worker.mjs', 'chronolife\manifest.json', 'chronolife\README.md',
+      'live\live.py', 'live\phone_live.py', 'live\README.md', 'scripts\zstd-frames.mjs', 'installer\AGENTS.tpl.md')
+    $gone = @($oldCode | Where-Object { Test-Path (Join-Path $app $_) })
+    foreach ($f in $gone) { Remove-Item (Join-Path $app $f) -Force -ErrorAction SilentlyContinue }
+    # 删空了的文件夹也去掉（python 留下的 __pycache__ 一起删；里面还有别的东西就留着）
+    foreach ($d in @('sing\shim', 'scene', 'letter', 'postcard', 'media', 'life', 'images', 'bili', 'radio', 'phone', 'sing', 'chronolife', 'live')) {
+      $p = Join-Path $app $d
+      if (-not (Test-Path $p)) { continue }
+      Remove-Item (Join-Path $p '__pycache__') -Recurse -Force -ErrorAction SilentlyContinue
+      if (-not (Get-ChildItem $p -Force -ErrorAction SilentlyContinue)) { Remove-Item $p -Force -ErrorAction SilentlyContinue }
+    }
+    if ($gone.Count) { Say "  老版本的代码用不上了，删掉了 $($gone.Count) 个文件" }
     Mark '程序文件' $true
   } elseif (Test-Path (Join-Path $app 'bridge.mjs')) {
     Mark '程序文件（已经装好了，只改设置）' $true   # 从 agent-bridge\installer 里运行：改功能 / 改 key
@@ -342,11 +350,14 @@ function Install-All($A) {
   Update-EnvFile $envPath $v
   $personaPath = Join-Path $app 'persona.md'
   if ($A.resetPersona -or -not (Test-Path $personaPath)) {
-    [IO.File]::WriteAllText($personaPath, (Expand-Template ([IO.File]::ReadAllText((Join-Path $app 'persona.default.md'), [Text.Encoding]::UTF8)) $A.name $on), (New-Object Text.UTF8Encoding($false)))
+    # 只换上名字；<!-- if:voice --> … <!-- end --> 这种条件段留着，机器人按 .env 里开没开那个功能决定用不用（以后在 .env 里打开也生效）
+    [IO.File]::WriteAllText($personaPath, ([IO.File]::ReadAllText((Join-Path $app 'persona.default.md'), [Text.Encoding]::UTF8)).Replace('{{NAME}}', $A.name), (New-Object Text.UTF8Encoding($false)))
     Say '  人设：用默认人设（可以直接改 agent-bridge\persona.md）'
   } else { Say '  人设：保留现在的 persona.md' }
-  [IO.File]::WriteAllText((Join-Path $dir 'AGENTS.md'), (Expand-Template ([IO.File]::ReadAllText((Join-Path $app 'installer\AGENTS.tpl.md'), [Text.Encoding]::UTF8)) $A.name $on), (New-Object Text.UTF8Encoding($false)))
-  Mark '配置（.env / 人设 / AGENTS.md）' $true
+  # 模型干活用的说明（AGENTS.md，在安装目录里）由机器人启动时按装了的插件自己写；老版本安装器写的那份路径都不对了，删掉让它重写
+  $agentsMd = Join-Path $dir 'AGENTS.md'
+  if ((Test-Path $agentsMd) -and (Get-Content $agentsMd -TotalCount 1 -Encoding UTF8) -eq '# 本机 Agent 速查') { Remove-Item $agentsMd -Force }
+  Mark '配置（.env / 人设）' $true
 
   # 2b. 离线包自带的 Node.js 24 和 DSH（runtime.zip）：解到安装目录的 tools\node 和 agent-bridge\node_modules；解过同一份就跳过
   $runtimeMark = Join-Path $tools 'node\runtime.json'
@@ -512,7 +523,7 @@ function Install-All($A) {
       Mark '语音识别模型 Whisper base' ($code -eq 0)
     }
   }
-  if ($on -contains 'sing') { Say '  唱歌：先另外装好 Seed-VC，再在 agent-bridge\.env 里填 SEEDVC_RUNTIME，用 sing\render.py 转歌（见 README）' }
+  if ($on -contains 'sing') { Say '  唱歌：先另外装好 Seed-VC，再在 agent-bridge\.env 里填 SEEDVC_RUNTIME，用 sing\learn.mjs 学歌（见 使用说明.md）' }
 
   # 9. 桌面快捷方式
   Set-Progress 95 '桌面快捷方式'
@@ -1088,12 +1099,12 @@ if ($Shot) {
     $checks['phone'].Checked = $true; $checks['voice'].Checked = $true; Show-Page 3
     $script:ui = @{ log = $tLog; bar = $bar; step = $lStep; sub = $lSub; pct = $lPct }
     Show-Page 4
-    foreach ($m in @('安装到 C:\QQBot', '✓ 程序文件', '✓ 配置（.env / 人设 / AGENTS.md）', '  解开了自带的 Node.js 和 DSH', '✓ Node.js v24.14.1（安装包自带）', '✓ DSH（安装包自带）', '✓ DSH 配置')) { Say $m }
+    foreach ($m in @('安装到 C:\QQBot', '✓ 程序文件', '✓ 配置（.env / 人设）', '  解开了自带的 Node.js 和 DSH', '✓ Node.js v24.14.1（安装包自带）', '✓ DSH（安装包自带）', '✓ DSH 配置')) { Say $m }
     Set-Progress 50 'NapCat'; Save-Shot 'page5.png'
     Say "  NapCat 要从官网下：已经在浏览器里打开了下载链接，下好 $NapCatName 会自动接着装"
     Show-NapPanel $true; Save-Shot 'page5-napcat.png'; Show-NapPanel $false
     $demo = [pscustomobject]@{ name = '小鱼'; dir = 'C:\QQBot' }
-    $okList = @('程序文件', '配置（.env / 人设 / AGENTS.md）', 'Node.js v24.14.1（安装包自带）', 'DSH（安装包自带）', 'DSH 配置', 'NapCat', 'NapCat 连接配置', 'QQ（C:\Program Files\Tencent\QQNT\QQ.exe）', '表情包', '桌面快捷方式（小鱼 / 小鱼状态）')
+    $okList = @('程序文件', '配置（.env / 人设）', 'Node.js v24.14.1（安装包自带）', 'DSH（安装包自带）', 'DSH 配置', 'NapCat', 'NapCat 连接配置', 'QQ（C:\Program Files\Tencent\QQNT\QQ.exe）', '表情包', '桌面快捷方式（小鱼 / 小鱼状态）')
     Show-Done @($okList | ForEach-Object { [pscustomobject]@{ what = $_; ok = $true; note = '' } }) $demo
     $someBad = @($okList | ForEach-Object { [pscustomobject]@{ what = $_; ok = ($_ -notlike 'NapCat*'); note = $(if ($_ -eq 'NapCat') { "还没下：从官网下好 $NapCatName（放在`“下载`”文件夹就行），再运行一次 agent-bridge\installer\修改设置.cmd，会自动找到并配置好" } else { '' }) } } | Where-Object { $_.what -ne 'NapCat 连接配置' })
     Show-Done $someBad $demo '-warn'
